@@ -15,7 +15,13 @@ impl WhisperEngine {
     }
 
     pub fn load_model(&mut self, path: &str) -> Result<(), String> {
-        let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+        // Read the entire model file into memory instead of relying on mmap.
+        // whisper.cpp's default file-based loading uses mmap, which can cause
+        // SIGBUS on macOS when Metal GPU buffer allocation creates memory pressure.
+        let buffer = std::fs::read(path)
+            .map_err(|e| format!("Failed to read model file '{}': {}", path, e))?;
+
+        let ctx = WhisperContext::new_from_buffer_with_params(&buffer, WhisperContextParameters::default())
             .map_err(|e| format!("Failed to load model from '{}': {}", path, e))?;
         self.ctx = Some(ctx);
         Ok(())
