@@ -1,0 +1,17 @@
+# Build outputs
+target/
+dist/
+node_modules/
+
+# Model files (too large for git)
+models/*.bin
+
+# Test audio (user-specific)
+test-audio/
+
+# Temp files
+*.tmp
+.DS_Store
+
+# Tauri generated
+app/src-tauri/gen/

@@ -1,0 +1,50 @@
+[package]
+name = "voice-input"
+version = "0.1.0"
+description = "Local voice-to-text input tool"
+authors = ["marklai"]
+edition = "2021"
+
+[lib]
+name = "voice_input_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+dirs = "5"
+
+# Whisper
+whisper-rs = { version = "0.15", features = ["metal"] }
+
+# Audio recording
+cpal = "0.15"
+
+# Clipboard
+arboard = "3"
+
+# Keyboard simulation
+enigo = { version = "0.3", features = ["serde"] }
+
+# Audio file reading
+hound = "3.5"
+
+# HTTP for model download
+reqwest = { version = "0.12", features = ["stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hashing for model verification
+sha2 = "0.10"
