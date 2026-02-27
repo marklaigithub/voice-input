@@ -19,14 +19,22 @@
       const h: HistoryEntry[] = await invoke('get_history')
       $history = h
 
-      // If model not loaded, try to init
+      // If model not loaded, try to init after a delay
+      // (let Tauri fully initialize + Metal shaders compile first)
       if (!status.model_loaded) {
         const hasModel: boolean = await invoke('check_model')
         if (hasModel) {
           $appState = 'loading'
-          await invoke('init_whisper')
-          $modelLoaded = true
-          $appState = 'idle'
+          // Delay model loading to avoid memory pressure during startup
+          await new Promise(r => setTimeout(r, 2000))
+          try {
+            await invoke('init_whisper')
+            $modelLoaded = true
+            $appState = 'idle'
+          } catch (loadErr) {
+            $errorMessage = `Model 載入失敗：${loadErr}`
+            $appState = 'idle'
+          }
         }
       }
     } catch (e) {
