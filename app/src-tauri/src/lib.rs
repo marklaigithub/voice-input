@@ -26,7 +26,6 @@ pub fn run() {
                         ShortcutState::Released => "released",
                     };
                     let _ = app.emit("shortcut-event", state_str);
-                    log::info!("Shortcut {:?} {:?}", shortcut, event.state);
                 })
                 .build(),
         )
@@ -40,7 +39,7 @@ pub fn run() {
 
             // Initialize state
             let recorder = audio::AudioRecorder::new().unwrap_or_else(|e| {
-                log::error!("Failed to init audio recorder: {e}");
+                eprintln!("Failed to init audio recorder: {e}");
                 panic!("No audio input device available: {e}");
             });
 
@@ -94,7 +93,6 @@ pub fn run() {
                 .map_err(|e| format!("Failed to parse shortcut '{}': {}", shortcut_key, e))?;
             app.global_shortcut().register(shortcut)
                 .map_err(|e| format!("Failed to register shortcut: {}", e))?;
-            log::info!("Registered global shortcut: {}", shortcut_key);
 
             Ok(())
         })

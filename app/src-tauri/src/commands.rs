@@ -1,6 +1,17 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+fn debug_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/voice-input-debug.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 use crate::{
     audio::AudioRecorder,
     config::AppConfig,
@@ -185,6 +196,20 @@ pub fn stop_recording_and_transcribe(
         (samples, duration)
     };
 
+    // Debug: log audio stats to file
+    {
+        let peak = audio_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voice-input-debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[CMD] stop_and_transcribe: samples={}, duration={:.2}s, peak={:.6}",
+                audio_samples.len(), duration_secs, peak);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 2. Minimum duration guard
     // -----------------------------------------------------------------------
@@ -213,13 +238,25 @@ pub fn stop_recording_and_transcribe(
             .lock()
             .map_err(|_| "Failed to lock whisper".to_string())?;
 
-        whisper.transcribe(&audio_samples, &language)?
+        match whisper.transcribe(&audio_samples, &language) {
+            Ok(t) => {
+                debug_log(&format!("[CMD] transcribe OK: '{}'", t));
+                t
+            }
+            Err(e) => {
+                debug_log(&format!("[CMD] transcribe FAILED: {}", e));
+                return Err(e);
+            }
+        }
     };
 
     let text = text.trim().to_string();
     if text.is_empty() {
+        debug_log("[CMD] transcribe returned empty after trim");
         return Err("Transcription returned empty text".to_string());
     }
+
+    debug_log(&format!("[CMD] pasting text: '{}'", text));
 
     // -----------------------------------------------------------------------
     // 5. Paste into active application
@@ -230,7 +267,13 @@ pub fn stop_recording_and_transcribe(
             .lock()
             .map_err(|_| "Failed to lock paste manager".to_string())?;
 
-        paste.paste_text(&text)?;
+        match paste.paste_text(&text) {
+            Ok(()) => debug_log("[CMD] paste OK"),
+            Err(e) => {
+                debug_log(&format!("[CMD] paste FAILED: {}", e));
+                return Err(e);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

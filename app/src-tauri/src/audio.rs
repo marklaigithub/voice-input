@@ -56,6 +56,18 @@ impl AudioRecorder {
         self.sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
 
+        // Log device info for debugging
+        let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voice-input-debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[AUDIO] device='{}', rate={}Hz, channels={}, format={:?}",
+                device_name, self.sample_rate, channels, config.sample_format());
+        }
+
         let samples = Arc::clone(&self.samples);
         let is_recording = Arc::clone(&self.is_recording);
         let is_recording_err = Arc::clone(&self.is_recording);
@@ -146,7 +158,22 @@ impl AudioRecorder {
             buf.clone()
         };
 
+        let raw_peak = raw_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+
         let resampled = resample_to_16k(&raw_samples, self.sample_rate);
+        let res_peak = resampled.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+
+        // Write diagnostics to file since .app bundle has no stderr
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voice-input-debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[AUDIO] raw: {} samples at {}Hz, peak={:.6}", raw_samples.len(), self.sample_rate, raw_peak);
+            let _ = writeln!(f, "[AUDIO] resampled: {} samples at 16000Hz, peak={:.6}", resampled.len(), res_peak);
+        }
+
         Ok(resampled)
     }
 
