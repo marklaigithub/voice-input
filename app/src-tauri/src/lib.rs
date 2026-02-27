@@ -12,6 +12,7 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager,
 };
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -35,6 +36,7 @@ pub fn run() {
             let config = config::load_config();
             let config_dir = config::config_dir();
             let max_history = config.max_history;
+            let shortcut_key = config.shortcut.clone();
 
             // Initialize state
             let recorder = audio::AudioRecorder::new().unwrap_or_else(|e| {
@@ -85,6 +87,14 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // Register global shortcut (press-to-talk)
+            let shortcut = shortcut_key
+                .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                .map_err(|e| format!("Failed to parse shortcut '{}': {}", shortcut_key, e))?;
+            app.global_shortcut().register(shortcut)
+                .map_err(|e| format!("Failed to register shortcut: {}", e))?;
+            log::info!("Registered global shortcut: {}", shortcut_key);
 
             Ok(())
         })
