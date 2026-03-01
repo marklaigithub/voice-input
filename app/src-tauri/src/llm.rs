@@ -78,7 +78,7 @@ pub async fn correct_transcription(
         .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
 
     let corrected = parsed.response.trim().to_string();
-    if corrected.is_empty() || corrected.len() > text.len() * 3 {
+    if corrected.is_empty() || corrected.chars().count() > text.chars().count() * 3 {
         Ok(text.to_string())
     } else {
         Ok(corrected)
