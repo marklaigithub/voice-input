@@ -6,6 +6,8 @@ use std::sync::{
 
 pub struct AudioRecorder {
     samples: Arc<Mutex<Vec<f32>>>,
+    all_samples: Arc<Mutex<Vec<f32>>>,
+    noise_floor: Arc<Mutex<Option<f32>>>,
     is_recording: Arc<AtomicBool>,
     stream: Option<cpal::Stream>,
     sample_rate: u32,
@@ -31,6 +33,8 @@ impl AudioRecorder {
 
         Ok(Self {
             samples: Arc::new(Mutex::new(Vec::new())),
+            all_samples: Arc::new(Mutex::new(Vec::new())),
+            noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate,
@@ -42,6 +46,14 @@ impl AudioRecorder {
         {
             let mut buf = self.samples.lock().unwrap();
             buf.clear();
+        }
+        {
+            let mut all = self.all_samples.lock().unwrap();
+            all.clear();
+        }
+        {
+            let mut nf = self.noise_floor.lock().unwrap();
+            *nf = None;
         }
 
         let host = cpal::default_host();
@@ -69,8 +81,11 @@ impl AudioRecorder {
         }
 
         let samples = Arc::clone(&self.samples);
+        let all_samples = Arc::clone(&self.all_samples);
+        let noise_floor = Arc::clone(&self.noise_floor);
         let is_recording = Arc::clone(&self.is_recording);
         let is_recording_err = Arc::clone(&self.is_recording);
+        let calibration_rate = self.sample_rate;
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device
@@ -80,6 +95,19 @@ impl AudioRecorder {
                         let mono = stereo_to_mono_f32(data, channels);
                         let mut buf = samples.lock().unwrap();
                         buf.extend_from_slice(&mono);
+                        let mut all = all_samples.lock().unwrap();
+                        all.extend_from_slice(&mono);
+                        // Calibrate noise floor from first ~0.1 seconds
+                        let mut nf = noise_floor.lock().unwrap();
+                        if nf.is_none() {
+                            let calibration_samples = (calibration_rate as f32 * 0.1) as usize;
+                            if all.len() >= calibration_samples {
+                                let peak = all[..calibration_samples]
+                                    .iter()
+                                    .fold(0.0f32, |max, &s| max.max(s.abs()));
+                                *nf = Some(peak);
+                            }
+                        }
                     },
                     move |err| {
                         log::error!("Audio stream error: {err}");
@@ -91,6 +119,8 @@ impl AudioRecorder {
 
             cpal::SampleFormat::I16 => {
                 let samples_i16 = Arc::clone(&self.samples);
+                let all_samples_i16 = Arc::clone(&self.all_samples);
+                let noise_floor_i16 = Arc::clone(&self.noise_floor);
                 let is_recording_err_i16 = Arc::clone(&self.is_recording);
                 device
                     .build_input_stream(
@@ -101,6 +131,18 @@ impl AudioRecorder {
                             let mono = stereo_to_mono_f32(&converted, channels);
                             let mut buf = samples_i16.lock().unwrap();
                             buf.extend_from_slice(&mono);
+                            let mut all = all_samples_i16.lock().unwrap();
+                            all.extend_from_slice(&mono);
+                            let mut nf = noise_floor_i16.lock().unwrap();
+                            if nf.is_none() {
+                                let calibration_samples = (calibration_rate as f32 * 0.1) as usize;
+                                if all.len() >= calibration_samples {
+                                    let peak = all[..calibration_samples]
+                                        .iter()
+                                        .fold(0.0f32, |max, &s| max.max(s.abs()));
+                                    *nf = Some(peak);
+                                }
+                            }
                         },
                         move |err| {
                             log::error!("Audio stream error: {err}");
@@ -113,6 +155,8 @@ impl AudioRecorder {
 
             cpal::SampleFormat::U16 => {
                 let samples_u16 = Arc::clone(&self.samples);
+                let all_samples_u16 = Arc::clone(&self.all_samples);
+                let noise_floor_u16 = Arc::clone(&self.noise_floor);
                 let is_recording_err_u16 = Arc::clone(&self.is_recording);
                 device
                     .build_input_stream(
@@ -125,6 +169,18 @@ impl AudioRecorder {
                             let mono = stereo_to_mono_f32(&converted, channels);
                             let mut buf = samples_u16.lock().unwrap();
                             buf.extend_from_slice(&mono);
+                            let mut all = all_samples_u16.lock().unwrap();
+                            all.extend_from_slice(&mono);
+                            let mut nf = noise_floor_u16.lock().unwrap();
+                            if nf.is_none() {
+                                let calibration_samples = (calibration_rate as f32 * 0.1) as usize;
+                                if all.len() >= calibration_samples {
+                                    let peak = all[..calibration_samples]
+                                        .iter()
+                                        .fold(0.0f32, |max, &s| max.max(s.abs()));
+                                    *nf = Some(peak);
+                                }
+                            }
                         },
                         move |err| {
                             log::error!("Audio stream error: {err}");
@@ -153,8 +209,10 @@ impl AudioRecorder {
         // Drop the stream to stop the audio callback
         self.stream = None;
 
+        // Use all_samples (complete recording) instead of samples (which may
+        // have been partially drained by streaming chunks).
         let raw_samples = {
-            let buf = self.samples.lock().unwrap();
+            let buf = self.all_samples.lock().unwrap();
             buf.clone()
         };
 
@@ -208,16 +266,20 @@ impl AudioRecorder {
             return None;
         }
 
-        // Silence detection: if peak amplitude is too low, skip transcription
+        // Dynamic silence detection: threshold is based on noise floor measured
+        // from the first 0.1 seconds of each recording session.
+        // This adapts to different microphones and environments automatically.
+        let noise_floor = self.noise_floor.lock().unwrap().unwrap_or(0.0);
+        let threshold = (noise_floor * 5.0).max(0.001);
         let peak = raw_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
-        if peak < 0.01 {
+        if peak < threshold {
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open("/tmp/voice-input-debug.log")
             {
                 use std::io::Write;
-                let _ = writeln!(f, "[AUDIO] chunk skipped: silence (peak={:.6})", peak);
+                let _ = writeln!(f, "[AUDIO] chunk skipped: silence (peak={:.6}, threshold={:.6}, noise_floor={:.6})", peak, threshold, noise_floor);
             }
             // Put samples back so they aren't permanently lost
             buf.extend_from_slice(&raw_samples);
