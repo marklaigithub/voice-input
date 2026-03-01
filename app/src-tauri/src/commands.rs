@@ -296,7 +296,7 @@ pub async fn stop_recording_and_transcribe(
     debug_log(&format!("[CMD] pasting text: '{}'", text));
 
     // -----------------------------------------------------------------------
-    // 5. Paste into active application
+    // 5. Paste into active application (fallback to clipboard if paste fails)
     // -----------------------------------------------------------------------
     {
         let mut paste = state
@@ -307,8 +307,11 @@ pub async fn stop_recording_and_transcribe(
         match paste.paste_text(&text) {
             Ok(()) => debug_log("[CMD] paste OK"),
             Err(e) => {
-                debug_log(&format!("[CMD] paste FAILED: {}", e));
-                return Err(e);
+                debug_log(&format!("[CMD] paste FAILED, fallback to clipboard: {}", e));
+                if let Err(clip_err) = paste.clipboard_only(&text) {
+                    debug_log(&format!("[CMD] clipboard fallback FAILED: {}", clip_err));
+                }
+                let _ = app.emit("paste-fallback", e);
             }
         }
     }
@@ -401,7 +404,7 @@ pub fn transcribe_chunk(
 
     debug_log(&format!("[CMD] chunk pasting: '{}'", text));
 
-    // 4. Paste into active application
+    // 4. Paste into active application (fallback to clipboard if paste fails)
     {
         let mut paste = state
             .paste
@@ -411,8 +414,11 @@ pub fn transcribe_chunk(
         match paste.paste_text(&text) {
             Ok(()) => debug_log("[CMD] chunk paste OK"),
             Err(e) => {
-                debug_log(&format!("[CMD] chunk paste FAILED: {}", e));
-                return Err(e);
+                debug_log(&format!("[CMD] chunk paste FAILED, fallback to clipboard: {}", e));
+                if let Err(clip_err) = paste.clipboard_only(&text) {
+                    debug_log(&format!("[CMD] chunk clipboard fallback FAILED: {}", clip_err));
+                }
+                let _ = app.emit("paste-fallback", e);
             }
         }
     }

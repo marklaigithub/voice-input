@@ -97,6 +97,10 @@
     await listen<boolean>('llm-correction-done', (event) => {
       llmApplied = event.payload
     })
+
+    await listen<string>('paste-fallback', (event) => {
+      $errorMessage = `無法自動貼上（${event.payload}），文字已複製到剪貼簿，請手動 ⌘V`
+    })
   })
 
   async function handleClearHistory() {
