@@ -48,6 +48,21 @@ Hold shortcut → Record audio (cpal)
   ollama pull gemma3:4b
   ```
 
+## macOS Permissions
+
+Voice Input needs two system permissions to work correctly:
+
+1. **Microphone** — macOS will prompt automatically on first recording
+2. **Accessibility** — required to simulate `Cmd+V` paste into the active app
+
+To grant Accessibility access:
+
+> System Settings → Privacy & Security → Accessibility → add Voice Input (or the terminal running `tauri dev`)
+
+**Important:** macOS ties Accessibility permission to the app binary's hash. Every time you rebuild the app, the old permission is invalidated and must be re-granted. If transcription works but text doesn't appear, this is almost certainly the cause.
+
+If Accessibility permission is missing, Voice Input falls back to copying text to the clipboard — you'll see a notification asking you to paste manually with `Cmd+V`.
+
 ## Build & Run
 
 All commands run from the `app/` directory.
@@ -68,6 +83,11 @@ npm run tauri build
 ```
 
 The built `.app` bundle will be in `app/src-tauri/target/release/bundle/macos/`.
+
+**Run tests:**
+```bash
+cargo test --manifest-path app/src-tauri/Cargo.toml
+```
 
 ## Configuration
 
@@ -94,9 +114,10 @@ app/
 ├── src/                  # Svelte frontend
 └── src-tauri/
     └── src/
-        ├── audio.rs      # Audio recording (cpal)
+        ├── lib.rs        # Tauri app setup, global shortcuts, tray menu
+        ├── audio.rs      # Audio recording + resampling (cpal)
         ├── whisper.rs    # Whisper model loading and transcription
-        ├── llm.rs        # Ollama LLM correction
+        ├── llm.rs        # Ollama LLM correction + hallucination guard
         ├── commands.rs   # Tauri IPC command handlers
         ├── config.rs     # App configuration (JSON file)
         ├── paste.rs      # Clipboard paste into active app
