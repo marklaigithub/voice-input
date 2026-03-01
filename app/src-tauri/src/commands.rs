@@ -345,11 +345,10 @@ pub async fn stop_recording_and_transcribe(
 }
 
 /// Transcribes a chunk of audio while still recording (streaming mode).
-/// Takes accumulated samples from the buffer, transcribes them, and pastes the result.
-/// Returns the transcribed text, or None if there wasn't enough audio yet.
+/// Returns the transcribed text for UI preview only — does NOT paste or save history.
+/// The definitive transcription + paste happens in stop_recording_and_transcribe.
 #[tauri::command]
 pub fn transcribe_chunk(
-    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
     // 1. Take chunk from recorder (while still recording)
@@ -378,7 +377,7 @@ pub fn transcribe_chunk(
             .clone()
     };
 
-    // 3. Transcribe
+    // 3. Transcribe (preview only — no paste, no history, no emit)
     let text = {
         let whisper = state
             .whisper
@@ -401,48 +400,6 @@ pub fn transcribe_chunk(
     if text.is_empty() {
         return Ok(None);
     }
-
-    debug_log(&format!("[CMD] chunk pasting: '{}'", text));
-
-    // 4. Paste into active application (fallback to clipboard if paste fails)
-    {
-        let mut paste = state
-            .paste
-            .lock()
-            .map_err(|_| "Failed to lock paste manager".to_string())?;
-
-        match paste.paste_text(&text) {
-            Ok(()) => debug_log("[CMD] chunk paste OK"),
-            Err(e) => {
-                debug_log(&format!("[CMD] chunk paste FAILED, fallback to clipboard: {}", e));
-                if let Err(clip_err) = paste.clipboard_only(&text) {
-                    debug_log(&format!("[CMD] chunk clipboard fallback FAILED: {}", clip_err));
-                }
-                let _ = app.emit("paste-fallback", e);
-            }
-        }
-    }
-
-    // 5. Add to history
-    {
-        let entry = HistoryEntry {
-            timestamp: chrono::Local::now(),
-            text: text.clone(),
-            source: TranscriptionSource::PressToTalk,
-            duration_secs,
-        };
-
-        let mut history = state
-            .history
-            .lock()
-            .map_err(|_| "Failed to lock history".to_string())?;
-
-        history.add(entry);
-    }
-
-    // 6. Emit event
-    app.emit("transcription-complete", text.clone())
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
 
     Ok(Some(text))
 }

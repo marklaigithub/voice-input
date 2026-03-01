@@ -59,7 +59,7 @@
           $appState = 'idle'
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
-        stopStreaming()
+        await stopStreaming()
         try {
           $appState = 'transcribing'
           const text: string = await invoke('stop_recording_and_transcribe')
@@ -161,30 +161,40 @@
   }
 
   // Settings editing
-  // Streaming transcription
+  // Streaming transcription (preview only — no paste during recording)
   let streamingInterval: ReturnType<typeof setInterval> | null = $state(null)
   let streamingChunks = $state(0)
+  let pendingChunk: Promise<void> | null = $state(null)
   const CHUNK_INTERVAL_MS = 6000 // transcribe every 6 seconds
 
   function startStreaming() {
     streamingChunks = 0
-    streamingInterval = setInterval(async () => {
-      try {
-        const result: string | null = await invoke('transcribe_chunk')
-        if (result) {
-          streamingChunks++
-          $lastTranscription = result
+    streamingInterval = setInterval(() => {
+      const promise = (async () => {
+        try {
+          const result: string | null = await invoke('transcribe_chunk')
+          if (result) {
+            streamingChunks++
+            $lastTranscription = result
+          }
+        } catch (e) {
+          console.warn('Chunk transcription failed:', e)
         }
-      } catch (e) {
-        console.warn('Chunk transcription failed:', e)
-      }
+      })()
+      pendingChunk = promise
+      promise.then(() => { if (pendingChunk === promise) pendingChunk = null })
     }, CHUNK_INTERVAL_MS)
   }
 
-  function stopStreaming() {
+  async function stopStreaming() {
     if (streamingInterval) {
       clearInterval(streamingInterval)
       streamingInterval = null
+    }
+    // Wait for any in-flight chunk to finish before stop_recording_and_transcribe
+    if (pendingChunk) {
+      await pendingChunk
+      pendingChunk = null
     }
   }
 
