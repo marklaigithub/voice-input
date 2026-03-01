@@ -78,10 +78,10 @@ pub async fn correct_transcription(
         .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
 
     let corrected = parsed.response.trim().to_string();
-    if corrected.is_empty() || corrected.chars().count() > text.chars().count() * 3 {
-        Ok(text.to_string())
-    } else {
+    if should_accept_correction(text, &corrected) {
         Ok(corrected)
+    } else {
+        Ok(text.to_string())
     }
 }
 
@@ -120,4 +120,67 @@ pub async fn check_ollama_status(endpoint: &str, model: &str) -> (bool, bool) {
         .unwrap_or(false);
 
     (reachable, model_available)
+}
+
+/// Determine whether a corrected transcription should be accepted or rejected.
+///
+/// Returns `true` if the corrected text should be used, `false` if we should
+/// fall back to the original (empty or hallucinated-long response).
+pub(crate) fn should_accept_correction(original: &str, corrected: &str) -> bool {
+    let corrected = corrected.trim();
+    if corrected.is_empty() {
+        return false;
+    }
+    // Guard against LLM hallucination: reject if corrected is >3x original length
+    corrected.chars().count() <= original.chars().count() * 3
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_normal_correction() {
+        assert!(should_accept_correction("你好嗎", "你好嗎？"));
+    }
+
+    #[test]
+    fn reject_empty_correction() {
+        assert!(!should_accept_correction("你好", ""));
+        assert!(!should_accept_correction("你好", "   "));
+    }
+
+    #[test]
+    fn reject_hallucinated_long_response() {
+        // Original: 3 chars, corrected: 10+ chars → reject
+        let original = "你好嗎";
+        let hallucinated = "你好嗎？今天天氣真不錯，我覺得我們應該出去走走";
+        assert!(!should_accept_correction(original, hallucinated));
+    }
+
+    #[test]
+    fn cjk_chars_count_not_bytes() {
+        // "你好" = 2 chars (6 bytes). Limit = 2*3 = 6 chars.
+        let original = "你好";
+        // 6 CJK chars = within limit
+        let corrected = "你好嗎你好嗎";
+        assert!(should_accept_correction(original, corrected));
+
+        // 7 CJK chars = over limit
+        let over = "你好嗎你好嗎你";
+        assert!(!should_accept_correction(original, over));
+    }
+
+    #[test]
+    fn accept_same_length() {
+        assert!(should_accept_correction("hello world", "Hello World"));
+    }
+
+    #[test]
+    fn boundary_exactly_3x() {
+        // Original: 2 chars, 3x = 6 chars. Exactly 6 should be accepted.
+        let original = "Hi";
+        let corrected = "Hello!"; // 6 chars
+        assert!(should_accept_correction(original, corrected));
+    }
 }

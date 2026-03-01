@@ -336,3 +336,107 @@ pub fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
 
     resampled
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── stereo_to_mono_f32 ──────────────────────────────────────────
+
+    #[test]
+    fn mono_passthrough() {
+        let data = vec![0.1, 0.2, 0.3];
+        let result = stereo_to_mono_f32(&data, 1);
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn stereo_averaging() {
+        // Two channels: (0.4, 0.6) → 0.5, (1.0, 0.0) → 0.5
+        let data = vec![0.4, 0.6, 1.0, 0.0];
+        let result = stereo_to_mono_f32(&data, 2);
+        assert_eq!(result.len(), 2);
+        assert!((result[0] - 0.5).abs() < 1e-6);
+        assert!((result[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn four_channel_averaging() {
+        let data = vec![0.0, 0.4, 0.8, 1.2]; // one frame, avg = 0.6
+        let result = stereo_to_mono_f32(&data, 4);
+        assert_eq!(result.len(), 1);
+        assert!((result[0] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_input() {
+        let result = stereo_to_mono_f32(&[], 2);
+        assert!(result.is_empty());
+    }
+
+    // ── resample_to_16k ─────────────────────────────────────────────
+
+    #[test]
+    fn resample_identity_at_16k() {
+        let samples = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let result = resample_to_16k(&samples, 16000);
+        assert_eq!(result, samples);
+    }
+
+    #[test]
+    fn resample_empty() {
+        let result = resample_to_16k(&[], 48000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resample_48k_to_16k_length() {
+        // 48000 / 16000 = 3x ratio, so 4800 samples → ~1600
+        let samples: Vec<f32> = (0..4800).map(|i| (i as f32 / 4800.0).sin()).collect();
+        let result = resample_to_16k(&samples, 48000);
+        assert_eq!(result.len(), 1600);
+    }
+
+    #[test]
+    fn resample_preserves_dc_signal() {
+        // Constant signal should remain constant after resampling
+        let samples = vec![0.42; 3200];
+        let result = resample_to_16k(&samples, 32000);
+        for &s in &result {
+            assert!((s - 0.42).abs() < 1e-6, "DC signal should be preserved");
+        }
+    }
+
+    #[test]
+    fn resample_44100_to_16k() {
+        // 44100 Hz is a common real-world rate
+        let samples: Vec<f32> = vec![0.5; 44100]; // 1 second
+        let result = resample_to_16k(&samples, 44100);
+        // Should be approximately 16000 samples (±1 for rounding)
+        assert!(
+            (result.len() as i32 - 16000).abs() <= 1,
+            "Expected ~16000, got {}",
+            result.len()
+        );
+    }
+
+    // ── noise floor / silence threshold logic ───────────────────────
+
+    #[test]
+    fn dynamic_threshold_calculation() {
+        // The threshold formula: max(noise_floor * 5.0, 0.001)
+        let noise_floor = 0.003_f32;
+        let threshold = (noise_floor * 5.0).max(0.001);
+        assert!((threshold - 0.015).abs() < 1e-6);
+
+        // Very quiet environment → clamp to minimum
+        let noise_floor = 0.0001_f32;
+        let threshold = (noise_floor * 5.0).max(0.001);
+        assert!((threshold - 0.001).abs() < 1e-6);
+
+        // No noise floor yet → 0.0 falls to minimum
+        let noise_floor = 0.0_f32;
+        let threshold = (noise_floor * 5.0).max(0.001);
+        assert!((threshold - 0.001).abs() < 1e-6);
+    }
+}
