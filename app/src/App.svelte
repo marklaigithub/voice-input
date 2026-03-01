@@ -170,6 +170,9 @@
   function startStreaming() {
     streamingChunks = 0
     streamingInterval = setInterval(() => {
+      // Skip if previous chunk is still being transcribed (re-entry guard)
+      if (pendingChunk) return
+
       const promise = (async () => {
         try {
           const result: string | null = await invoke('transcribe_chunk')

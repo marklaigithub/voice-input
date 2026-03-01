@@ -243,7 +243,7 @@ impl AudioRecorder {
         if self.sample_rate == 0 {
             return 0.0;
         }
-        let buf = self.samples.lock().unwrap();
+        let buf = self.all_samples.lock().unwrap();
         buf.len() as f64 / self.sample_rate as f64
     }
 
@@ -269,7 +269,9 @@ impl AudioRecorder {
         // Dynamic silence detection: threshold is based on noise floor measured
         // from the first 0.1 seconds of each recording session.
         // This adapts to different microphones and environments automatically.
-        let noise_floor = self.noise_floor.lock().unwrap().unwrap_or(0.0);
+        // Cap noise_floor to avoid false high threshold when user speaks
+        // during the 0.1s calibration window.
+        let noise_floor = self.noise_floor.lock().unwrap().unwrap_or(0.0).min(0.05);
         let threshold = (noise_floor * 5.0).max(0.001);
         let peak = raw_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
         if peak < threshold {
@@ -424,19 +426,28 @@ mod tests {
 
     #[test]
     fn dynamic_threshold_calculation() {
-        // The threshold formula: max(noise_floor * 5.0, 0.001)
-        let noise_floor = 0.003_f32;
+        // The threshold formula: max(noise_floor.min(0.05) * 5.0, 0.001)
+        let noise_floor = 0.003_f32.min(0.05);
         let threshold = (noise_floor * 5.0).max(0.001);
         assert!((threshold - 0.015).abs() < 1e-6);
 
         // Very quiet environment → clamp to minimum
-        let noise_floor = 0.0001_f32;
+        let noise_floor = 0.0001_f32.min(0.05);
         let threshold = (noise_floor * 5.0).max(0.001);
         assert!((threshold - 0.001).abs() < 1e-6);
 
         // No noise floor yet → 0.0 falls to minimum
-        let noise_floor = 0.0_f32;
+        let noise_floor = 0.0_f32.min(0.05);
         let threshold = (noise_floor * 5.0).max(0.001);
         assert!((threshold - 0.001).abs() < 1e-6);
+    }
+
+    #[test]
+    fn noise_floor_capped_when_speech_during_calibration() {
+        // If user speaks during calibration, noise_floor could be high (e.g. 0.3).
+        // Cap at 0.05 so threshold stays reasonable: 0.05 * 5.0 = 0.25
+        let noise_floor = 0.3_f32.min(0.05);
+        let threshold = (noise_floor * 5.0).max(0.001);
+        assert!((threshold - 0.25).abs() < 1e-6);
     }
 }
