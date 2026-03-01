@@ -42,25 +42,34 @@
       $appState = 'idle'
     }
 
+    // Check LLM availability
+    checkLlmStatus()
+
     // Listen for shortcut events (press-to-talk)
     await listen<string>('shortcut-event', async (event) => {
       if (event.payload === 'pressed' && $appState === 'idle' && $modelLoaded) {
         try {
           $appState = 'recording'
+          llmApplied = null
           await invoke('start_recording')
+          // Start streaming transcription after a delay
+          startStreaming()
         } catch (e) {
           $errorMessage = String(e)
           $appState = 'idle'
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
+        stopStreaming()
         try {
           $appState = 'transcribing'
           const text: string = await invoke('stop_recording_and_transcribe')
-          $lastTranscription = text
+          if (text) {
+            $lastTranscription = text
+            // Refresh history
+            const h: HistoryEntry[] = await invoke('get_history')
+            $history = h
+          }
           $appState = 'idle'
-          // Refresh history
-          const h: HistoryEntry[] = await invoke('get_history')
-          $history = h
         } catch (e) {
           const err = String(e)
           if (err === 'too_short') {
@@ -77,6 +86,17 @@
     await listen<string>('transcription-complete', (event) => {
       $lastTranscription = event.payload
     })
+
+    // Listen for LLM correction events
+    await listen('llm-correction-start', () => {
+      if ($appState === 'transcribing') {
+        $appState = 'correcting'
+      }
+    })
+
+    await listen<boolean>('llm-correction-done', (event) => {
+      llmApplied = event.payload
+    })
   })
 
   async function handleClearHistory() {
@@ -89,6 +109,7 @@
       case 'idle': return 'Ready'
       case 'recording': return 'Recording...'
       case 'transcribing': return 'Transcribing...'
+      case 'correcting': return 'Correcting...'
       case 'loading': return 'Loading model...'
       default: return state
     }
@@ -98,6 +119,7 @@
     switch (state) {
       case 'recording': return '#ef4444'
       case 'transcribing': return '#f59e0b'
+      case 'correcting': return '#8b5cf6'
       case 'loading': return '#6b7280'
       default: return '#22c55e'
     }
@@ -113,9 +135,115 @@
   }
 
   function formatSource(source: HistoryEntry['source']): string {
-    if ('PressToTalk' in source) return 'PTT'
-    if ('File' in source) return source.File
+    if (typeof source === 'string') {
+      return source === 'PressToTalk' ? 'PTT' : source
+    }
+    if (source && typeof source === 'object') {
+      if ('PressToTalk' in source) return 'PTT'
+      if ('File' in source) return (source as { File: string }).File
+    }
     return '?'
+  }
+
+  function formatShortcut(raw: string): string {
+    return raw
+      .replace('CmdOrCtrl', '⌘')
+      .replace('Cmd', '⌘')
+      .replace('Ctrl', '⌃')
+      .replace('Alt', '⌥')
+      .replace('Shift', '⇧')
+      .replace('Space', 'Space')
+      .replace(/\+/g, ' ')
+  }
+
+  // Settings editing
+  // Streaming transcription
+  let streamingInterval: ReturnType<typeof setInterval> | null = $state(null)
+  let streamingChunks = $state(0)
+  const CHUNK_INTERVAL_MS = 6000 // transcribe every 6 seconds
+
+  function startStreaming() {
+    streamingChunks = 0
+    streamingInterval = setInterval(async () => {
+      try {
+        const result: string | null = await invoke('transcribe_chunk')
+        if (result) {
+          streamingChunks++
+          $lastTranscription = result
+        }
+      } catch (e) {
+        console.warn('Chunk transcription failed:', e)
+      }
+    }, CHUNK_INTERVAL_MS)
+  }
+
+  function stopStreaming() {
+    if (streamingInterval) {
+      clearInterval(streamingInterval)
+      streamingInterval = null
+    }
+  }
+
+  let editingLanguage = $state(false)
+  let languageInput = $state('')
+  let savingConfig = $state(false)
+  let llmStatus = $state<{ available: boolean; model_available: boolean } | null>(null)
+  let llmApplied = $state<boolean | null>(null)
+  let editingLlmModel = $state(false)
+  let llmModelInput = $state('')
+
+  async function saveConfig(updates: Partial<import('./lib/types').AppConfig>) {
+    if (!$config || savingConfig) return
+    savingConfig = true
+    try {
+      const newConfig = { ...$config, ...updates }
+      await invoke('save_config', { config: newConfig })
+      $config = newConfig
+    } catch (e) {
+      $errorMessage = `設定儲存失敗：${e}`
+    } finally {
+      savingConfig = false
+    }
+  }
+
+  function toggleSound() {
+    if ($config) saveConfig({ sound_enabled: !$config.sound_enabled })
+  }
+
+  function startEditLanguage() {
+    languageInput = $config?.language ?? 'auto'
+    editingLanguage = true
+  }
+
+  function saveLanguage() {
+    saveConfig({ language: languageInput })
+    editingLanguage = false
+  }
+
+  async function checkLlmStatus() {
+    try {
+      const status = await invoke<{ available: boolean; model_available: boolean; enabled: boolean; model: string }>('check_llm_status')
+      llmStatus = { available: status.available, model_available: status.model_available }
+    } catch {
+      llmStatus = null
+    }
+  }
+
+  async function toggleLlm() {
+    if ($config) {
+      await saveConfig({ llm_enabled: !$config.llm_enabled })
+      checkLlmStatus()
+    }
+  }
+
+  function startEditLlmModel() {
+    llmModelInput = $config?.llm_model ?? 'gemma3:4b'
+    editingLlmModel = true
+  }
+
+  function saveLlmModel() {
+    saveConfig({ llm_model: llmModelInput })
+    editingLlmModel = false
   }
 </script>
 
@@ -150,12 +278,12 @@
         </div>
         {#if $lastTranscription}
           <div class="last-result">
-            <span class="label-text">Last transcription:</span>
+            <span class="label-text">Last transcription:{#if llmApplied === true} <span class="llm-badge">LLM</span>{/if}</span>
             <p>{$lastTranscription}</p>
           </div>
         {/if}
         <div class="shortcut-hint">
-          <p>Press <kbd>{$config?.shortcut ?? 'Cmd+Shift+Space'}</kbd> to talk</p>
+          <p>Press <kbd>{formatShortcut($config?.shortcut ?? 'Cmd+Shift+Space')}</kbd> to talk</p>
         </div>
       </div>
 
@@ -187,23 +315,82 @@
 
     {:else if activeTab === 'settings'}
       <div class="settings-panel">
-        <p class="placeholder">Settings panel (coming soon)</p>
         <div class="setting-item">
-          <span class="label-text">Shortcut</span>
-          <span>{$config?.shortcut ?? '...'}</span>
+          <span class="label-text">Talk shortcut</span>
+          <kbd>{formatShortcut($config?.shortcut ?? '...')}</kbd>
+        </div>
+        <div class="setting-item">
+          <span class="label-text">Quit shortcut</span>
+          <kbd>{formatShortcut($config?.quit_shortcut ?? '...')}</kbd>
         </div>
         <div class="setting-item">
           <span class="label-text">Language</span>
-          <span>{$config?.language ?? 'auto'}</span>
+          {#if editingLanguage}
+            <div class="inline-edit">
+              <input
+                type="text"
+                bind:value={languageInput}
+                onkeydown={(e: KeyboardEvent) => e.key === 'Enter' && saveLanguage()}
+                placeholder="auto, en, zh, ja..."
+              />
+              <button class="save-btn" onclick={saveLanguage}>✓</button>
+              <button class="cancel-btn" onclick={() => editingLanguage = false}>✕</button>
+            </div>
+          {:else}
+            <button class="edit-value" onclick={startEditLanguage}>{$config?.language ?? 'auto'}</button>
+          {/if}
         </div>
         <div class="setting-item">
           <span class="label-text">Sound effects</span>
-          <span>{$config?.sound_enabled ? 'On' : 'Off'}</span>
+          <button class="toggle" class:on={$config?.sound_enabled} onclick={toggleSound}>
+            {$config?.sound_enabled ? 'On' : 'Off'}
+          </button>
         </div>
         <div class="setting-item">
-          <span class="label-text">Model</span>
-          <span>{$modelLoaded ? 'Loaded' : 'Not loaded'}</span>
+          <span class="label-text">LLM 校正</span>
+          <button class="toggle" class:on={$config?.llm_enabled} onclick={toggleLlm}>
+            {$config?.llm_enabled ? 'On' : 'Off'}
+          </button>
         </div>
+        {#if $config?.llm_enabled}
+          <div class="setting-item">
+            <span class="label-text">LLM 模型</span>
+            {#if editingLlmModel}
+              <div class="inline-edit">
+                <input
+                  type="text"
+                  bind:value={llmModelInput}
+                  onkeydown={(e: KeyboardEvent) => e.key === 'Enter' && saveLlmModel()}
+                  placeholder="gemma3:4b"
+                  style="width: 140px"
+                />
+                <button class="save-btn" onclick={saveLlmModel}>✓</button>
+                <button class="cancel-btn" onclick={() => editingLlmModel = false}>✕</button>
+              </div>
+            {:else}
+              <button class="edit-value" onclick={startEditLlmModel}>{$config?.llm_model ?? 'gemma3:4b'}</button>
+            {/if}
+          </div>
+          <div class="setting-item">
+            <span class="label-text">Ollama 狀態</span>
+            <span class="model-status" class:loaded={llmStatus?.model_available}>
+              {#if llmStatus === null}
+                Checking...
+              {:else if !llmStatus.available}
+                Not available
+              {:else if !llmStatus.model_available}
+                Model not found
+              {:else}
+                Ready
+              {/if}
+            </span>
+          </div>
+        {/if}
+        <div class="setting-item">
+          <span class="label-text">Model</span>
+          <span class="model-status" class:loaded={$modelLoaded}>{$modelLoaded ? 'Loaded' : 'Not loaded'}</span>
+        </div>
+        <p class="settings-hint">Shortcuts can be changed in config.json</p>
       </div>
     {/if}
   </section>
@@ -339,12 +526,6 @@
     border-radius: 8px;
   }
 
-  .last-result label {
-    font-size: 11px;
-    color: #94a3b8;
-    text-transform: uppercase;
-  }
-
   .last-result p {
     margin: 4px 0 0;
     font-size: 15px;
@@ -449,9 +630,96 @@
     font-size: 13px;
   }
 
-  .placeholder {
-    color: #64748b;
+  .edit-value {
+    background: none;
+    border: 1px solid transparent;
+    color: #e0e0e0;
     font-size: 13px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .edit-value:hover {
+    border-color: #334155;
+    background: #0f3460;
+  }
+
+  .inline-edit {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .inline-edit input {
+    width: 80px;
+    padding: 2px 6px;
+    background: #0f3460;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 13px;
+  }
+
+  .save-btn, .cancel-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+  }
+
+  .save-btn { color: #22c55e; }
+  .cancel-btn { color: #94a3b8; }
+
+  .toggle {
+    padding: 4px 12px;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    font-size: 12px;
+    cursor: pointer;
+    background: #1e293b;
+    color: #94a3b8;
+    transition: all 0.2s;
+  }
+
+  .toggle.on {
+    background: #166534;
+    border-color: #22c55e;
+    color: #4ade80;
+  }
+
+  .model-status {
+    font-size: 13px;
+    color: #94a3b8;
+  }
+
+  .model-status.loaded {
+    color: #4ade80;
+  }
+
+  .llm-badge {
+    background: #8b5cf6;
+    color: white;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    margin-left: 4px;
+    text-transform: uppercase;
+  }
+
+  .settings-hint {
+    color: #475569;
+    font-size: 11px;
     text-align: center;
+    margin-top: 8px;
+  }
+
+  .setting-item kbd {
+    background: #0f3460;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
   }
 </style>

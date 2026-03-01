@@ -56,18 +56,23 @@ impl PasteManager {
         }
 
         // Simulate Cmd+V
+        // IMPORTANT: Always release Meta key even if the V click fails,
+        // otherwise the system Cmd key stays stuck.
         let mut enigo =
             Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init failed: {e}"))?;
         thread::sleep(Duration::from_millis(50));
         enigo
             .key(Key::Meta, enigo::Direction::Press)
             .map_err(|e| format!("Key press failed: {e}"))?;
-        enigo
+        let click_result = enigo
             .key(Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| format!("Key click failed: {e}"))?;
-        enigo
+            .map_err(|e| format!("Key click failed: {e}"));
+        let release_result = enigo
             .key(Key::Meta, enigo::Direction::Release)
-            .map_err(|e| format!("Key release failed: {e}"))?;
+            .map_err(|e| format!("Key release failed: {e}"));
+        // Propagate errors after ensuring Release ran
+        click_result?;
+        release_result?;
 
         Ok(())
     }

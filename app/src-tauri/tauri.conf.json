@@ -22,12 +22,8 @@
         "visible": false
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/tray-idle.png",
-      "iconAsTemplate": true
-    },
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src ipc: https://ipc.localhost"
     }
   },
   "bundle": {

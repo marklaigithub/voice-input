@@ -2,12 +2,14 @@ pub mod audio;
 pub mod commands;
 pub mod config;
 pub mod history;
+pub mod llm;
 pub mod model;
 pub mod paste;
 pub mod whisper;
 
 use commands::AppState;
 use tauri::{
+    image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
     Emitter, Manager,
@@ -21,6 +23,21 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     use tauri_plugin_global_shortcut::ShortcutState;
+                    // Check if this is the quit shortcut
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Ok(config) = state.config.lock() {
+                            if let Ok(quit_sc) = config.quit_shortcut.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                                if *shortcut == quit_sc && event.state == ShortcutState::Pressed {
+                                    if let Ok(mut paste) = state.paste.lock() {
+                                        let _ = paste.restore_clipboard();
+                                    }
+                                    app.exit(0);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    // Otherwise it's the talk shortcut
                     let state_str = match event.state {
                         ShortcutState::Pressed => "pressed",
                         ShortcutState::Released => "released",
@@ -36,12 +53,18 @@ pub fn run() {
             let config_dir = config::config_dir();
             let max_history = config.max_history;
             let shortcut_key = config.shortcut.clone();
+            let quit_shortcut_key = config.quit_shortcut.clone();
 
             // Initialize state
-            let recorder = audio::AudioRecorder::new().unwrap_or_else(|e| {
-                eprintln!("Failed to init audio recorder: {e}");
-                panic!("No audio input device available: {e}");
-            });
+            let recorder = match audio::AudioRecorder::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    use tauri_plugin_dialog::DialogExt;
+                    let msg = format!("無法初始化麥克風：{e}\n\n請確認系統有可用的音訊輸入裝置。");
+                    app.dialog().message(&msg).blocking_show();
+                    return Err(format!("No audio input device: {e}").into());
+                }
+            };
 
             let state = AppState {
                 config: std::sync::Mutex::new(config),
@@ -57,15 +80,20 @@ pub fn run() {
 
             // Build tray menu
             let show_item = MenuItemBuilder::with_id("show", "Open Voice Input").build(app)?;
-            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let quit_label = format!("Quit ({})", quit_shortcut_key.replace("CmdOrCtrl", "Cmd").replace("Alt", "Option"));
+            let quit_item = MenuItemBuilder::with_id("quit", &quit_label).build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
 
-            // Build tray icon
+            // Build tray icon (embed at compile time for reliable loading in .app bundle)
+            let icon = Image::from_bytes(include_bytes!("../icons/tray-idle.png"))
+                .expect("Failed to decode embedded tray icon");
             let _tray = TrayIconBuilder::new()
+                .icon(icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .tooltip("Voice Input")
                 .on_menu_event(move |app, event| match event.id().as_ref() {
@@ -87,12 +115,32 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Register global shortcut (press-to-talk)
-            let shortcut = shortcut_key
+            // Register global shortcuts
+            let talk_shortcut = shortcut_key
                 .parse::<tauri_plugin_global_shortcut::Shortcut>()
-                .map_err(|e| format!("Failed to parse shortcut '{}': {}", shortcut_key, e))?;
-            app.global_shortcut().register(shortcut)
-                .map_err(|e| format!("Failed to register shortcut: {}", e))?;
+                .map_err(|e| format!("Failed to parse talk shortcut '{}': {}", shortcut_key, e))?;
+            if let Err(e) = app.global_shortcut().register(talk_shortcut) {
+                use tauri_plugin_dialog::DialogExt;
+                let msg = format!(
+                    "無法註冊語音快捷鍵 {}\n\n可能被其他應用程式佔用。\n請在 config.json 中更換其他快捷鍵。\n\n錯誤：{e}",
+                    shortcut_key
+                );
+                app.dialog().message(&msg).blocking_show();
+                return Err(format!("Failed to register talk shortcut: {e}").into());
+            }
+
+            let quit_shortcut = quit_shortcut_key
+                .parse::<tauri_plugin_global_shortcut::Shortcut>()
+                .map_err(|e| format!("Failed to parse quit shortcut '{}': {}", quit_shortcut_key, e))?;
+            if let Err(e) = app.global_shortcut().register(quit_shortcut) {
+                use tauri_plugin_dialog::DialogExt;
+                let msg = format!(
+                    "無法註冊退出快捷鍵 {}\n\n可能被其他應用程式佔用。\n請在 config.json 中更換其他快捷鍵。\n\n錯誤：{e}",
+                    quit_shortcut_key
+                );
+                app.dialog().message(&msg).blocking_show();
+                return Err(format!("Failed to register quit shortcut: {e}").into());
+            }
 
             Ok(())
         })
@@ -105,10 +153,12 @@ pub fn run() {
             commands::init_whisper,
             commands::start_recording,
             commands::stop_recording_and_transcribe,
+            commands::transcribe_chunk,
             commands::get_history,
             commands::clear_history,
             commands::transcribe_file,
             commands::get_engine_busy,
+            commands::check_llm_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running voice-input");

@@ -188,6 +188,56 @@ impl AudioRecorder {
         let buf = self.samples.lock().unwrap();
         buf.len() as f64 / self.sample_rate as f64
     }
+
+    /// Take a chunk of recorded audio for streaming transcription.
+    /// Returns resampled 16kHz samples and the chunk duration.
+    /// The taken samples are drained from the buffer so they won't be included
+    /// in the next chunk or in stop_recording.
+    pub fn take_chunk(&mut self) -> Option<(Vec<f32>, f64)> {
+        let mut buf = self.samples.lock().unwrap();
+        if buf.is_empty() {
+            return None;
+        }
+
+        let raw_samples: Vec<f32> = buf.drain(..).collect();
+        let duration = raw_samples.len() as f64 / self.sample_rate as f64;
+
+        if duration < 0.5 {
+            // Too short, put it back for the next chunk
+            buf.extend_from_slice(&raw_samples);
+            return None;
+        }
+
+        // Silence detection: if peak amplitude is too low, skip transcription
+        let peak = raw_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+        if peak < 0.01 {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/voice-input-debug.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "[AUDIO] chunk skipped: silence (peak={:.6})", peak);
+            }
+            // Put samples back so they aren't permanently lost
+            buf.extend_from_slice(&raw_samples);
+            return None; // Silence — don't transcribe
+        }
+
+        let resampled = resample_to_16k(&raw_samples, self.sample_rate);
+
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voice-input-debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "[AUDIO] chunk: {} raw samples, {:.2}s, peak={:.6}, resampled to {} @ 16kHz",
+                raw_samples.len(), duration, peak, resampled.len());
+        }
+
+        Some((resampled, duration))
+    }
 }
 
 /// Convert interleaved multi-channel audio to mono by averaging all channels.

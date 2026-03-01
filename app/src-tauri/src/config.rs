@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub model_path: String,
     #[serde(default = "default_shortcut")]
     pub shortcut: String,
+    #[serde(default = "default_quit_shortcut")]
+    pub quit_shortcut: String,
     #[serde(default = "default_language")]
     pub language: String,
     #[serde(default = "default_sound_enabled")]
@@ -16,6 +18,12 @@ pub struct AppConfig {
     pub ffmpeg_path: Option<String>,
     #[serde(default = "default_max_history")]
     pub max_history: usize,
+    #[serde(default = "default_llm_enabled")]
+    pub llm_enabled: bool,
+    #[serde(default = "default_llm_model")]
+    pub llm_model: String,
+    #[serde(default = "default_llm_endpoint")]
+    pub llm_endpoint: String,
 }
 
 fn default_model_path() -> String {
@@ -32,8 +40,12 @@ fn default_shortcut() -> String {
     "CmdOrCtrl+Shift+Space".to_string()
 }
 
+fn default_quit_shortcut() -> String {
+    "CmdOrCtrl+Alt+Q".to_string()
+}
+
 fn default_language() -> String {
-    "auto".to_string()
+    "zh".to_string()
 }
 
 fn default_sound_enabled() -> bool {
@@ -44,15 +56,31 @@ fn default_max_history() -> usize {
     50
 }
 
+fn default_llm_enabled() -> bool {
+    false
+}
+
+fn default_llm_model() -> String {
+    "gemma3:4b".to_string()
+}
+
+fn default_llm_endpoint() -> String {
+    "http://localhost:11434".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model_path: default_model_path(),
             shortcut: default_shortcut(),
+            quit_shortcut: default_quit_shortcut(),
             language: default_language(),
             sound_enabled: default_sound_enabled(),
             ffmpeg_path: None,
             max_history: default_max_history(),
+            llm_enabled: default_llm_enabled(),
+            llm_model: default_llm_model(),
+            llm_endpoint: default_llm_endpoint(),
         }
     }
 }

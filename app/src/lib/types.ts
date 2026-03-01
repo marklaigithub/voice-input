@@ -1,10 +1,14 @@
 export interface AppConfig {
   model_path: string
   shortcut: string
+  quit_shortcut: string
   language: string
   sound_enabled: boolean
   ffmpeg_path: string | null
   max_history: number
+  llm_enabled: boolean
+  llm_model: string
+  llm_endpoint: string
 }
 
 export interface AppStatus {
@@ -21,4 +25,4 @@ export interface HistoryEntry {
   duration_secs: number
 }
 
-export type AppState = 'idle' | 'recording' | 'transcribing' | 'loading'
+export type AppState = 'idle' | 'recording' | 'transcribing' | 'correcting' | 'loading'

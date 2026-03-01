@@ -44,6 +44,14 @@ pub struct AppStatus {
     pub config: AppConfig,
 }
 
+#[derive(Debug, Serialize)]
+pub struct LlmStatus {
+    pub available: bool,
+    pub model_available: bool,
+    pub enabled: bool,
+    pub model: String,
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -176,7 +184,7 @@ pub fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
 /// - `"too_short"` – recording was shorter than 0.5 seconds
 /// - any other string – a human-readable error description
 #[tauri::command]
-pub fn stop_recording_and_transcribe(
+pub async fn stop_recording_and_transcribe(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -218,15 +226,19 @@ pub fn stop_recording_and_transcribe(
     }
 
     // -----------------------------------------------------------------------
-    // 3. Read language from config
+    // 3. Read language and LLM config
     // -----------------------------------------------------------------------
-    let language = {
-        state
+    let (language, llm_enabled, llm_model, llm_endpoint) = {
+        let config = state
             .config
             .lock()
-            .map_err(|_| "Failed to lock config".to_string())?
-            .language
-            .clone()
+            .map_err(|_| "Failed to lock config".to_string())?;
+        (
+            config.language.clone(),
+            config.llm_enabled,
+            config.llm_model.clone(),
+            config.llm_endpoint.clone(),
+        )
     };
 
     // -----------------------------------------------------------------------
@@ -253,8 +265,33 @@ pub fn stop_recording_and_transcribe(
     let text = text.trim().to_string();
     if text.is_empty() {
         debug_log("[CMD] transcribe returned empty after trim");
-        return Err("Transcription returned empty text".to_string());
+        return Ok(String::new());
     }
+
+    // -----------------------------------------------------------------------
+    // 4.5. LLM correction (no locks held during async call)
+    // -----------------------------------------------------------------------
+    let text = if llm_enabled {
+        debug_log(&format!("[CMD] LLM correction: model={}", llm_model));
+        let _ = app.emit("llm-correction-start", ());
+        match crate::llm::correct_transcription(&text, &llm_endpoint, &llm_model).await {
+            Ok(corrected) => {
+                let applied = corrected != text;
+                if applied {
+                    debug_log(&format!("[CMD] LLM: '{}' -> '{}'", text, corrected));
+                }
+                let _ = app.emit("llm-correction-done", applied);
+                corrected
+            }
+            Err(e) => {
+                debug_log(&format!("[CMD] LLM failed, using original: {}", e));
+                let _ = app.emit("llm-correction-done", false);
+                text
+            }
+        }
+    } else {
+        text
+    };
 
     debug_log(&format!("[CMD] pasting text: '{}'", text));
 
@@ -304,6 +341,106 @@ pub fn stop_recording_and_transcribe(
     Ok(text)
 }
 
+/// Transcribes a chunk of audio while still recording (streaming mode).
+/// Takes accumulated samples from the buffer, transcribes them, and pastes the result.
+/// Returns the transcribed text, or None if there wasn't enough audio yet.
+#[tauri::command]
+pub fn transcribe_chunk(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    // 1. Take chunk from recorder (while still recording)
+    let (audio_samples, duration_secs) = {
+        let mut recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "Failed to lock recorder".to_string())?;
+
+        match recorder.take_chunk() {
+            Some(chunk) => chunk,
+            None => return Ok(None), // Not enough audio yet
+        }
+    };
+
+    debug_log(&format!("[CMD] transcribe_chunk: samples={}, duration={:.2}s",
+        audio_samples.len(), duration_secs));
+
+    // 2. Read language from config
+    let language = {
+        state
+            .config
+            .lock()
+            .map_err(|_| "Failed to lock config".to_string())?
+            .language
+            .clone()
+    };
+
+    // 3. Transcribe
+    let text = {
+        let whisper = state
+            .whisper
+            .lock()
+            .map_err(|_| "Failed to lock whisper".to_string())?;
+
+        match whisper.transcribe(&audio_samples, &language) {
+            Ok(t) => {
+                debug_log(&format!("[CMD] chunk transcribe OK: '{}'", t));
+                t
+            }
+            Err(e) => {
+                debug_log(&format!("[CMD] chunk transcribe FAILED: {}", e));
+                return Err(e);
+            }
+        }
+    };
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+
+    debug_log(&format!("[CMD] chunk pasting: '{}'", text));
+
+    // 4. Paste into active application
+    {
+        let mut paste = state
+            .paste
+            .lock()
+            .map_err(|_| "Failed to lock paste manager".to_string())?;
+
+        match paste.paste_text(&text) {
+            Ok(()) => debug_log("[CMD] chunk paste OK"),
+            Err(e) => {
+                debug_log(&format!("[CMD] chunk paste FAILED: {}", e));
+                return Err(e);
+            }
+        }
+    }
+
+    // 5. Add to history
+    {
+        let entry = HistoryEntry {
+            timestamp: chrono::Local::now(),
+            text: text.clone(),
+            source: TranscriptionSource::PressToTalk,
+            duration_secs,
+        };
+
+        let mut history = state
+            .history
+            .lock()
+            .map_err(|_| "Failed to lock history".to_string())?;
+
+        history.add(entry);
+    }
+
+    // 6. Emit event
+    app.emit("transcription-complete", text.clone())
+        .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    Ok(Some(text))
+}
+
 /// Returns all history entries (most-recent-last order, as stored).
 #[tauri::command]
 pub fn get_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
@@ -347,4 +484,33 @@ pub fn get_engine_busy(state: State<'_, AppState>) -> bool {
         Ok(guard) => guard.is_busy(),
         Err(_) => true,
     }
+}
+
+/// Returns the current LLM/Ollama status so the frontend can display it.
+#[tauri::command]
+pub async fn check_llm_status(state: State<'_, AppState>) -> Result<LlmStatus, String> {
+    let (enabled, model, endpoint) = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|_| "Failed to lock config".to_string())?;
+        (
+            config.llm_enabled,
+            config.llm_model.clone(),
+            config.llm_endpoint.clone(),
+        )
+    };
+
+    let (available, model_available) = if enabled {
+        crate::llm::check_ollama_status(&endpoint, &model).await
+    } else {
+        (false, false)
+    };
+
+    Ok(LlmStatus {
+        available,
+        model_available,
+        enabled,
+        model,
+    })
 }
