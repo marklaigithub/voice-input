@@ -1,132 +1,132 @@
 # Voice Input
 
-A macOS desktop app that lets you dictate text into any application using a global press-to-talk shortcut. All speech recognition runs locally — no cloud APIs, no data leaving your machine.
+macOS 桌面應用程式，透過全域「按住說話」快捷鍵將語音轉為文字，直接輸入到任何應用程式中。語音辨識完全在本機執行——不需要雲端 API，資料不會離開你的電腦。
 
-## Features
+## 功能特色
 
-- **Global press-to-talk** — hold `Cmd+Shift+Space` to record, release to transcribe and type
-- **100% local** — uses [Whisper](https://github.com/openai/whisper) (via whisper.cpp) with Metal acceleration on Apple Silicon
-- **Optional LLM correction** — post-process transcriptions through a local [Ollama](https://ollama.com) model to fix proper nouns, punctuation, and language-specific quirks
-- **Streaming mode** — transcribes in chunks while you speak, useful for long dictations
-- **Transcription history** — browse and copy past transcriptions from the app window
-- **Configurable** — shortcut, language, model path, and LLM settings are all adjustable
+- **全域按住說話** — 按住 `Cmd+Shift+Space` 錄音，放開後自動轉錄並輸入文字
+- **100% 本機運行** — 使用 [Whisper](https://github.com/openai/whisper)（透過 whisper.cpp），在 Apple Silicon 上支援 Metal GPU 加速
+- **可選 LLM 校正** — 透過本機 [Ollama](https://ollama.com) 模型後處理轉錄結果，修正專有名詞、標點符號和語言特有問題
+- **串流模式** — 說話時即時分段轉錄，適合長篇口述
+- **轉錄歷史** — 在應用程式視窗中瀏覽和複製過去的轉錄記錄
+- **可自訂設定** — 快捷鍵、語言、模型路徑和 LLM 設定皆可調整
 
-## How It Works
+## 運作原理
 
 ```
-Hold shortcut → Record audio (cpal)
-             → Release shortcut
-             → Whisper transcription (whisper-rs, Metal)
-             → [Optional] LLM correction (Ollama REST API)
-             → Copy to clipboard + simulate paste (Cmd+V) into active app
-             → Save to history
+按住快捷鍵 → 錄音（cpal）
+           → 放開快捷鍵
+           → Whisper 語音轉錄（whisper-rs, Metal）
+           → [可選] LLM 校正（Ollama REST API）
+           → 複製到剪貼簿 + 模擬貼上（Cmd+V）到前台應用程式
+           → 儲存到歷史記錄
 ```
 
-## Tech Stack
+## 技術架構
 
-| Layer | Technology |
+| 層級 | 技術 |
 |---|---|
-| Frontend | Svelte 5 + TypeScript + Vite |
-| Backend | Rust + Tauri 2 |
-| Speech-to-Text | whisper-rs (whisper.cpp bindings, Metal GPU acceleration) |
-| LLM Correction | Ollama REST API |
-| Audio capture | cpal |
-| Clipboard + paste | arboard + enigo |
+| 前端 | Svelte 5 + TypeScript + Vite |
+| 後端 | Rust + Tauri 2 |
+| 語音轉文字 | whisper-rs（whisper.cpp 綁定，Metal GPU 加速）|
+| LLM 校正 | Ollama REST API |
+| 音訊擷取 | cpal |
+| 剪貼簿 + 貼上 | arboard + enigo |
 
-## Prerequisites
+## 系統需求
 
-- **macOS** (Apple Silicon recommended for Metal acceleration; Intel Macs will fall back to CPU)
-- **Rust toolchain** — install via [rustup](https://rustup.rs)
+- **macOS**（建議 Apple Silicon 以獲得 Metal 加速；Intel Mac 會退回 CPU 運算）
+- **Rust 工具鏈** — 透過 [rustup](https://rustup.rs) 安裝
 - **Node.js 18+**
-- **Whisper model file** — `ggml-medium.bin` placed at:
+- **Whisper 模型檔** — 將 `ggml-medium.bin` 放在：
   ```
   ~/Library/Application Support/com.voice-input.app/models/ggml-medium.bin
   ```
-  Download from [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp)
-- **Ollama** (optional) — required only if LLM correction is enabled. Install from [ollama.com](https://ollama.com), then pull your model:
+  可從 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) 下載
+- **Ollama**（可選）— 僅在啟用 LLM 校正時需要。從 [ollama.com](https://ollama.com) 安裝後，拉取模型：
   ```bash
   ollama pull gemma3:4b
   ```
 
-## macOS Permissions
+## macOS 權限設定
 
-Voice Input needs two system permissions to work correctly:
+Voice Input 需要兩項系統權限才能正常運作：
 
-1. **Microphone** — macOS will prompt automatically on first recording
-2. **Accessibility** — required to simulate `Cmd+V` paste into the active app
+1. **麥克風** — 首次錄音時 macOS 會自動彈出授權提示
+2. **輔助使用** — 用於模擬 `Cmd+V` 貼上到前台應用程式
 
-To grant Accessibility access:
+授予輔助使用權限：
 
-> System Settings → Privacy & Security → Accessibility → add Voice Input (or the terminal running `tauri dev`)
+> 系統設定 → 隱私權與安全性 → 輔助使用 → 加入 Voice Input（或執行 `tauri dev` 的終端機）
 
-**Important:** macOS ties Accessibility permission to the app binary's hash. Every time you rebuild the app, the old permission is invalidated and must be re-granted. If transcription works but text doesn't appear, this is almost certainly the cause.
+**重要：** macOS 將輔助使用權限綁定到應用程式二進位檔的 hash。每次重新建置應用程式後，舊的權限會失效，必須重新授予。如果轉錄正常但文字沒有出現，幾乎可以確定是這個原因。
 
-If Accessibility permission is missing, Voice Input falls back to copying text to the clipboard — you'll see a notification asking you to paste manually with `Cmd+V`.
+如果缺少輔助使用權限，Voice Input 會退回到僅複製到剪貼簿——你會看到通知提示手動 `Cmd+V` 貼上。
 
-## Build & Run
+## 建置與執行
 
-All commands run from the `app/` directory.
+所有指令在 `app/` 目錄下執行。
 
-**Install dependencies:**
+**安裝相依套件：**
 ```bash
 npm install
 ```
 
-**Development (with hot reload):**
+**開發模式（支援熱重載）：**
 ```bash
 npm run tauri dev
 ```
 
-**Production build:**
+**正式建置：**
 ```bash
 npm run tauri build
 ```
 
-The built `.app` bundle will be in `app/src-tauri/target/release/bundle/macos/`.
+建置好的 `.app` 套件會在 `app/src-tauri/target/release/bundle/macos/`。
 
-**Run tests:**
+**執行測試：**
 ```bash
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
-## Configuration
+## 設定說明
 
-Config file: `~/Library/Application Support/com.voice-input.app/config.json`
+設定檔位置：`~/Library/Application Support/com.voice-input.app/config.json`
 
-The file is created automatically on first run with defaults. Edit it while the app is closed, or use the Settings panel inside the app.
+首次執行時會自動建立預設設定檔。可在應用程式關閉時手動編輯，或使用應用程式內的設定面板。
 
-| Key | Default | Description |
+| 設定項 | 預設值 | 說明 |
 |---|---|---|
-| `shortcut` | `"CmdOrCtrl+Shift+Space"` | Global press-to-talk shortcut |
-| `quit_shortcut` | `"CmdOrCtrl+Alt+Q"` | Quit the app |
-| `language` | `"zh"` | Whisper language code (`"en"`, `"zh"`, `"ja"`, etc.) |
-| `model_path` | `…/models/ggml-medium.bin` | Absolute path to the Whisper model file |
-| `llm_enabled` | `false` | Enable Ollama LLM post-processing |
-| `llm_model` | `"gemma3:4b"` | Ollama model name |
-| `llm_endpoint` | `"http://localhost:11434"` | Ollama API base URL |
-| `sound_enabled` | `true` | Play sound effects on record start/stop |
-| `max_history` | `50` | Maximum number of history entries to keep |
+| `shortcut` | `"CmdOrCtrl+Shift+Space"` | 全域按住說話快捷鍵 |
+| `quit_shortcut` | `"CmdOrCtrl+Alt+Q"` | 退出應用程式 |
+| `language` | `"zh"` | Whisper 語言代碼（`"en"`、`"zh"`、`"ja"` 等）|
+| `model_path` | `…/models/ggml-medium.bin` | Whisper 模型檔的絕對路徑 |
+| `llm_enabled` | `false` | 啟用 Ollama LLM 後處理 |
+| `llm_model` | `"gemma3:4b"` | Ollama 模型名稱 |
+| `llm_endpoint` | `"http://localhost:11434"` | Ollama API 基礎 URL |
+| `sound_enabled` | `true` | 錄音開始/結束時播放音效 |
+| `max_history` | `50` | 歷史記錄保留的最大筆數 |
 
-## Project Structure
+## 專案結構
 
 ```
 app/
-├── src/                  # Svelte frontend
+├── src/                  # Svelte 前端
 └── src-tauri/
     └── src/
-        ├── lib.rs        # Tauri app setup, global shortcuts, tray menu
-        ├── audio.rs      # Audio recording + resampling (cpal)
-        ├── whisper.rs    # Whisper model loading and transcription
-        ├── llm.rs        # Ollama LLM correction + hallucination guard
-        ├── commands.rs   # Tauri IPC command handlers
-        ├── config.rs     # App configuration (JSON file)
-        ├── paste.rs      # Clipboard paste into active app
-        ├── history.rs    # Transcription history
-        └── model.rs      # Model file management
+        ├── lib.rs        # Tauri 應用程式設定、全域快捷鍵、系統匣選單
+        ├── audio.rs      # 音訊錄製 + 重取樣（cpal）
+        ├── whisper.rs    # Whisper 模型載入與轉錄
+        ├── llm.rs        # Ollama LLM 校正 + 幻覺守衛
+        ├── commands.rs   # Tauri IPC 指令處理器
+        ├── config.rs     # 應用程式設定（JSON 檔案）
+        ├── paste.rs      # 剪貼簿貼上到前台應用程式
+        ├── history.rs    # 轉錄歷史記錄
+        └── model.rs      # 模型檔案管理
 ```
 
-## Known Limitations
+## 已知限制
 
-- **macOS only** — the paste mechanism uses macOS-specific keyboard simulation; Linux and Windows are not supported
-- **No model auto-download** — the Whisper model file must be placed manually; in-app download is not yet implemented
-- **File transcription not yet implemented** — only live microphone input is supported; transcribing audio files is planned for a future release
+- **僅支援 macOS** — 貼上機制使用 macOS 專屬的鍵盤模擬；不支援 Linux 和 Windows
+- **不自動下載模型** — Whisper 模型檔必須手動放置；應用程式內下載功能尚未實作
+- **尚未支援檔案轉錄** — 目前僅支援即時麥克風輸入；轉錄音訊檔案預計在未來版本實作
