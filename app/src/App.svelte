@@ -113,11 +113,17 @@
     })
 
     await listen<string>('paste-fallback', (event) => {
-      $errorMessage = `無法自動貼上（${event.payload}），文字已複製到剪貼簿，請手動 ⌘V`
+      const reason = event.payload
+      if (reason.includes('Accessibility')) {
+        $errorMessage = '無法自動貼上：需要輔助使用權限。請前往「系統設定 → 隱私權與安全性 → 輔助使用」加入 Voice Input，文字已複製到剪貼簿'
+      } else {
+        $errorMessage = `無法自動貼上（${reason}），文字已複製到剪貼簿，請手動 ⌘V`
+      }
     })
   })
 
   async function handleClearHistory() {
+    if (!confirm(`確定清除全部 ${$history.length} 筆歷史記錄？此操作無法復原。`)) return
     await invoke('clear_history')
     $history = []
   }
@@ -367,6 +373,14 @@
     saveConfig({ llm_model: llmModelInput })
     editingLlmModel = false
   }
+
+  // Copy text to clipboard with brief visual feedback
+  let copiedId = $state<string | null>(null)
+  async function copyText(text: string, id: string) {
+    await navigator.clipboard.writeText(text)
+    copiedId = id
+    setTimeout(() => { if (copiedId === id) copiedId = null }, 1500)
+  }
 </script>
 
 <main>
@@ -408,7 +422,12 @@
         </div>
         {#if $lastTranscription}
           <div class="last-result">
-            <span class="label-text">最近轉錄{#if llmApplied === true} <span class="llm-badge">LLM</span>{/if}</span>
+            <div class="last-result-header">
+              <span class="label-text">最近轉錄{#if llmApplied === true} <span class="llm-badge">LLM</span>{/if}</span>
+              <button class="copy-btn" onclick={() => copyText($lastTranscription, 'last')}>
+                {copiedId === 'last' ? '已複製' : '複製'}
+              </button>
+            </div>
             <p>{$lastTranscription}</p>
           </div>
         {/if}
@@ -429,12 +448,15 @@
           <p class="empty">尚無轉錄記錄</p>
         {:else}
           <ul class="history-list">
-            {#each [...$history].reverse() as entry}
+            {#each [...$history].reverse() as entry, i}
               <li>
                 <div class="entry-meta">
                   <span class="time">{formatTimestamp(entry.timestamp)}</span>
                   <span class="source">{formatSource(entry.source)}</span>
                   <span class="duration">{entry.duration_secs.toFixed(1)}s</span>
+                  <button class="copy-btn" onclick={() => copyText(entry.text, `h${i}`)}>
+                    {copiedId === `h${i}` ? '已複製' : '複製'}
+                  </button>
                 </div>
                 <p class="entry-text">{entry.text}</p>
               </li>
@@ -489,6 +511,7 @@
           </button>
         </div>
         {#if $config?.llm_enabled}
+          <p class="settings-hint" style="margin: -4px 0 0; color: #64748b;">長段說話時會自動分段即時轉錄，此模式下不套用 LLM 校正以降低延遲</p>
           <div class="setting-item">
             <span class="label-text">LLM 模型</span>
             {#if editingLlmModel}
@@ -541,7 +564,7 @@
         {#if downloadError}
           <div class="setting-item error-text">{downloadError}</div>
         {/if}
-        <p class="settings-hint">快捷鍵可在 config.json 中修改</p>
+        <p class="settings-hint">快捷鍵可在 config.json 中修改，修改後需重新啟動 app 才會生效</p>
       </div>
     {/if}
   </section>
@@ -806,6 +829,29 @@
     margin: 0;
     font-size: 14px;
     line-height: 1.4;
+  }
+
+  .copy-btn {
+    margin-left: auto;
+    padding: 1px 8px;
+    border: 1px solid #334155;
+    border-radius: 3px;
+    background: transparent;
+    color: #64748b;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .copy-btn:hover {
+    border-color: #60a5fa;
+    color: #60a5fa;
+  }
+
+  .last-result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
   .settings-panel {
