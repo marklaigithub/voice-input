@@ -192,7 +192,7 @@
   // Indicator window show/hide
   async function showIndicatorWindow() {
     if (!$config?.show_recording_indicator) return
-    const win = WebviewWindow.getByLabel('indicator')
+    const win = await WebviewWindow.getByLabel('indicator')
     if (!win) return
     // Restore saved position (stored as physical coordinates from outerPosition)
     if ($config?.indicator_x != null && $config?.indicator_y != null) {
@@ -205,7 +205,7 @@
   }
 
   async function hideIndicatorWindow() {
-    const win = WebviewWindow.getByLabel('indicator')
+    const win = await WebviewWindow.getByLabel('indicator')
     if (!win) return
     // Save current position before hiding
     try {
