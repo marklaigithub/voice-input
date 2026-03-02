@@ -51,7 +51,7 @@ fn default_quit_shortcut() -> String {
 }
 
 fn default_language() -> String {
-    "zh".to_string()
+    "tw".to_string()
 }
 
 fn default_sound_enabled() -> bool {

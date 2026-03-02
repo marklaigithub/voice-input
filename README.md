@@ -102,7 +102,7 @@ cargo test --manifest-path app/src-tauri/Cargo.toml
 |---|---|---|
 | `shortcut` | `"CmdOrCtrl+Shift+Space"` | 全域按住說話快捷鍵 |
 | `quit_shortcut` | `"CmdOrCtrl+Alt+Q"` | 退出應用程式 |
-| `language` | `"zh"` | Whisper 語言代碼（`"en"`、`"zh"`、`"ja"` 等）|
+| `language` | `"tw"` | 語言代碼（`"tw"` 台灣華語、`"en"`、`"ja"` 等，`"auto"` 自動偵測）|
 | `model_path` | `…/models/ggml-medium.bin` | Whisper 模型檔的絕對路徑 |
 | `llm_enabled` | `false` | 啟用 Ollama LLM 後處理 |
 | `llm_model` | `"gemma3:4b"` | Ollama 模型名稱 |

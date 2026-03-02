@@ -61,7 +61,11 @@
           await emit('recording-started')
           await showIndicatorWindow()
         } catch (e) {
-          $errorMessage = String(e)
+          const err = String(e)
+          // "busy" and "already_recording" are expected race-condition rejections — ignore silently.
+          if (err !== 'busy' && err !== 'already_recording') {
+            $errorMessage = err
+          }
           $appState = 'idle'
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
@@ -120,11 +124,11 @@
 
   function stateLabel(state: string): string {
     switch (state) {
-      case 'idle': return 'Ready'
-      case 'recording': return 'Recording...'
-      case 'transcribing': return 'Transcribing...'
-      case 'correcting': return 'Correcting...'
-      case 'loading': return 'Loading model...'
+      case 'idle': return '就緒'
+      case 'recording': return '錄音中…'
+      case 'transcribing': return '轉錄中…'
+      case 'correcting': return '校正中…'
+      case 'loading': return '載入模型中…'
       default: return state
     }
   }
@@ -256,6 +260,21 @@
     }
   }
 
+  const languageOptions = [
+    { code: 'auto', name: '自動偵測' },
+    { code: 'tw', name: '台灣華語' },
+    { code: 'en', name: 'English' },
+    { code: 'ja', name: '日本語' },
+    { code: 'ko', name: '한국어' },
+    { code: 'fr', name: 'Français' },
+    { code: 'de', name: 'Deutsch' },
+    { code: 'es', name: 'Español' },
+  ]
+
+  function languageName(code: string): string {
+    return languageOptions.find(l => l.code === code)?.name ?? code
+  }
+
   let editingLanguage = $state(false)
   let languageInput = $state('')
   let savingConfig = $state(false)
@@ -291,8 +310,8 @@
     editingLanguage = true
   }
 
-  function saveLanguage() {
-    saveConfig({ language: languageInput })
+  function saveLanguage(code: string) {
+    saveConfig({ language: code })
     editingLanguage = false
   }
 
@@ -357,11 +376,11 @@
     <div class="status-dot" style="background-color: {stateColor($appState)}"></div>
     <span class="status-text">{stateLabel($appState)}</span>
     {#if !$modelLoaded && !isDownloading}
-      <span class="warning">Model not loaded</span>
-      <button class="download-btn" onclick={startModelDownload}>Download</button>
+      <span class="warning">模型未載入</span>
+      <button class="download-btn" onclick={startModelDownload}>下載</button>
     {/if}
     {#if isDownloading}
-      <span class="download-info">Downloading... {downloadProgress}%</span>
+      <span class="download-info">下載中… {downloadProgress}%</span>
     {/if}
   </header>
 
@@ -373,9 +392,9 @@
   {/if}
 
   <nav>
-    <button class:active={activeTab === 'status'} onclick={() => activeTab = 'status'}>Status</button>
-    <button class:active={activeTab === 'history'} onclick={() => activeTab = 'history'}>History</button>
-    <button class:active={activeTab === 'settings'} onclick={() => activeTab = 'settings'}>Settings</button>
+    <button class:active={activeTab === 'status'} onclick={() => activeTab = 'status'}>狀態</button>
+    <button class:active={activeTab === 'history'} onclick={() => activeTab = 'history'}>歷史</button>
+    <button class:active={activeTab === 'settings'} onclick={() => activeTab = 'settings'}>設定</button>
   </nav>
 
   <section class="content">
@@ -391,25 +410,25 @@
         </div>
         {#if $lastTranscription}
           <div class="last-result">
-            <span class="label-text">Last transcription:{#if llmApplied === true} <span class="llm-badge">LLM</span>{/if}</span>
+            <span class="label-text">最近轉錄{#if llmApplied === true} <span class="llm-badge">LLM</span>{/if}</span>
             <p>{$lastTranscription}</p>
           </div>
         {/if}
         <div class="shortcut-hint">
-          <p>Press <kbd>{formatShortcut($config?.shortcut ?? 'Cmd+Shift+Space')}</kbd> to talk</p>
+          <p>按住 <kbd>{formatShortcut($config?.shortcut ?? 'Cmd+Shift+Space')}</kbd> 說話</p>
         </div>
       </div>
 
     {:else if activeTab === 'history'}
       <div class="history-panel">
         <div class="history-header">
-          <h3>History ({$history.length})</h3>
+          <h3>歷史（{$history.length}）</h3>
           {#if $history.length > 0}
-            <button class="clear-btn" onclick={handleClearHistory}>Clear</button>
+            <button class="clear-btn" onclick={handleClearHistory}>清除</button>
           {/if}
         </div>
         {#if $history.length === 0}
-          <p class="empty">No transcriptions yet</p>
+          <p class="empty">尚無轉錄記錄</p>
         {:else}
           <ul class="history-list">
             {#each [...$history].reverse() as entry}
@@ -429,46 +448,46 @@
     {:else if activeTab === 'settings'}
       <div class="settings-panel">
         <div class="setting-item">
-          <span class="label-text">Talk shortcut</span>
+          <span class="label-text">說話快捷鍵</span>
           <kbd>{formatShortcut($config?.shortcut ?? '...')}</kbd>
         </div>
         <div class="setting-item">
-          <span class="label-text">Quit shortcut</span>
+          <span class="label-text">退出快捷鍵</span>
           <kbd>{formatShortcut($config?.quit_shortcut ?? '...')}</kbd>
         </div>
         <div class="setting-item">
-          <span class="label-text">Language</span>
+          <span class="label-text">語言</span>
           {#if editingLanguage}
-            <div class="inline-edit">
-              <input
-                type="text"
-                bind:value={languageInput}
-                onkeydown={(e: KeyboardEvent) => e.key === 'Enter' && saveLanguage()}
-                placeholder="auto, en, zh, ja..."
-              />
-              <button class="save-btn" onclick={saveLanguage}>✓</button>
+            <div class="lang-select">
+              {#each languageOptions as lang}
+                <button
+                  class="lang-option"
+                  class:selected={languageInput === lang.code}
+                  onclick={() => saveLanguage(lang.code)}
+                >{lang.name}</button>
+              {/each}
               <button class="cancel-btn" onclick={() => editingLanguage = false}>✕</button>
             </div>
           {:else}
-            <button class="edit-value" onclick={startEditLanguage}>{$config?.language ?? 'auto'}</button>
+            <button class="edit-value" onclick={startEditLanguage}>{languageName($config?.language ?? 'auto')}</button>
           {/if}
         </div>
         <div class="setting-item">
-          <span class="label-text">Sound effects</span>
+          <span class="label-text">音效</span>
           <button class="toggle" class:on={$config?.sound_enabled} onclick={toggleSound}>
-            {$config?.sound_enabled ? 'On' : 'Off'}
+            {$config?.sound_enabled ? '開' : '關'}
           </button>
         </div>
         <div class="setting-item">
-          <span class="label-text">Recording indicator</span>
+          <span class="label-text">錄音指示器</span>
           <button class="toggle" class:on={$config?.show_recording_indicator} onclick={toggleIndicator}>
-            {$config?.show_recording_indicator ? 'On' : 'Off'}
+            {$config?.show_recording_indicator ? '開' : '關'}
           </button>
         </div>
         <div class="setting-item">
           <span class="label-text">LLM 校正</span>
           <button class="toggle" class:on={$config?.llm_enabled} onclick={toggleLlm}>
-            {$config?.llm_enabled ? 'On' : 'Off'}
+            {$config?.llm_enabled ? '開' : '關'}
           </button>
         </div>
         {#if $config?.llm_enabled}
@@ -494,19 +513,19 @@
             <span class="label-text">Ollama 狀態</span>
             <span class="model-status" class:loaded={llmStatus?.model_available}>
               {#if llmStatus === null}
-                Checking...
+                檢查中…
               {:else if !llmStatus.available}
-                Not available
+                無法連線
               {:else if !llmStatus.model_available}
-                Model not found
+                模型未找到
               {:else}
-                Ready
+                就緒
               {/if}
             </span>
           </div>
         {/if}
         <div class="setting-item">
-          <span class="label-text">Model</span>
+          <span class="label-text">模型</span>
           {#if isDownloading}
             <div class="download-progress">
               <div class="progress-bar">
@@ -515,16 +534,16 @@
               <span class="progress-text">{downloadProgress}%</span>
             </div>
           {:else if $modelLoaded}
-            <span class="model-status loaded">Loaded</span>
+            <span class="model-status loaded">已載入</span>
           {:else}
-            <span class="model-status">Not loaded</span>
-            <button class="download-btn" onclick={startModelDownload}>Download</button>
+            <span class="model-status">未載入</span>
+            <button class="download-btn" onclick={startModelDownload}>下載</button>
           {/if}
         </div>
         {#if downloadError}
           <div class="setting-item error-text">{downloadError}</div>
         {/if}
-        <p class="settings-hint">Shortcuts can be changed in config.json</p>
+        <p class="settings-hint">快捷鍵可在 config.json 中修改</p>
       </div>
     {/if}
   </section>
@@ -848,6 +867,35 @@
     border-radius: 4px;
     color: #e0e0e0;
     font-size: 13px;
+  }
+
+  .lang-select {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .lang-option {
+    padding: 2px 8px;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    background: #0f3460;
+    color: #94a3b8;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .lang-option:hover {
+    border-color: #60a5fa;
+    color: #e0e0e0;
+  }
+
+  .lang-option.selected {
+    background: #1e40af;
+    border-color: #60a5fa;
+    color: #e0e0e0;
   }
 
   .save-btn, .cancel-btn {

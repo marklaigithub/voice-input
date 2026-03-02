@@ -82,10 +82,25 @@ impl WhisperEngine {
         if language == "auto" {
             params.set_language(None);
         } else {
-            params.set_language(Some(language));
+            // Map custom language codes to Whisper-compatible codes
+            let whisper_lang = match language {
+                "tw" => "zh",
+                other => other,
+            };
+            params.set_language(Some(whisper_lang));
         }
-        // Hint for mixed Chinese/English content
-        params.set_initial_prompt("以下是中英文混合的語音內容。");
+        // Bias output toward Traditional Chinese when language is Taiwanese.
+        // Whisper's training data is dominated by Simplified Chinese, so without
+        // a strong Traditional Chinese prompt it defaults to Simplified output.
+        // Including Taiwan-specific vocabulary further steers the model.
+        if language == "tw" {
+            params.set_initial_prompt(
+                "以下是台灣繁體中文的語音內容，使用繁體字與台灣用語。\
+                 程式碼、伺服器、執行緒、變數、記憶體、網路、資料庫。"
+            );
+        } else if language == "auto" {
+            params.set_initial_prompt("以下是語音轉錄內容。");
+        }
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);
@@ -160,6 +175,7 @@ fn filter_hallucinations(text: &str) -> String {
         // 字幕相關
         "字幕由",        "字幕提供",
         "字幕製作",      "字幕制作",
+        "字幕：",        "字幕:",
         "本字幕",
         // 其他常見幻覺
         "明鏡與點點",
