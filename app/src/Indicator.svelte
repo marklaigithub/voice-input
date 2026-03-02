@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core'
   import { listen } from '@tauri-apps/api/event'
   import { onMount } from 'svelte'
   import AudioWaveform from './lib/AudioWaveform.svelte'
@@ -8,32 +7,29 @@
   let elapsedSeconds = $state(0)
   let isRecording = $state(false)
 
-  let audioLevelInterval: ReturnType<typeof setInterval> | null = null
+  let unlistenAudioLevel: (() => void) | null = null
   let timerInterval: ReturnType<typeof setInterval> | null = null
 
-  function startPolling() {
+  async function startListening() {
     isRecording = true
     elapsedSeconds = 0
     audioLevel = 0
 
-    audioLevelInterval = setInterval(async () => {
-      try {
-        audioLevel = await invoke<number>('get_audio_level')
-      } catch {
-        audioLevel = 0
-      }
-    }, 80)
+    // Listen to audio-level events emitted by the backend
+    unlistenAudioLevel = await listen<number>('audio-level', (event) => {
+      audioLevel = event.payload
+    })
 
     timerInterval = setInterval(() => {
       elapsedSeconds++
     }, 1000)
   }
 
-  function stopPolling() {
+  function stopListening() {
     isRecording = false
-    if (audioLevelInterval) {
-      clearInterval(audioLevelInterval)
-      audioLevelInterval = null
+    if (unlistenAudioLevel) {
+      unlistenAudioLevel()
+      unlistenAudioLevel = null
     }
     if (timerInterval) {
       clearInterval(timerInterval)
@@ -51,11 +47,11 @@
 
   onMount(async () => {
     await listen('recording-started', () => {
-      startPolling()
+      startListening()
     })
 
     await listen('recording-stopped', () => {
-      stopPolling()
+      stopListening()
     })
   })
 </script>

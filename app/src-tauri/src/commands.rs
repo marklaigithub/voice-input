@@ -151,23 +151,49 @@ pub fn init_whisper(state: State<'_, AppState>) -> Result<(), String> {
     whisper.load_model(path_str)
 }
 
-/// Starts audio recording.
+/// Starts audio recording and spawns a background thread that emits
+/// `audio-level` events every ~80ms for waveform animation in all windows.
 #[tauri::command]
-pub fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
+pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let mut recorder = state
         .recorder
         .lock()
         .map_err(|_| "Failed to lock recorder".to_string())?;
 
-    recorder.start_recording()
+    recorder.start_recording()?;
+
+    // Spawn audio level emitter — thread exits when is_recording becomes false.
+    let (all_samples, is_recording) = recorder.level_emitter_refs();
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        while is_recording.load(Ordering::SeqCst) {
+            let level = {
+                let all = all_samples.lock().unwrap();
+                if all.is_empty() {
+                    0.0f32
+                } else {
+                    let window = 1600.min(all.len());
+                    let tail = &all[all.len() - window..];
+                    let sum_sq: f32 = tail.iter().map(|&s| s * s).sum();
+                    let rms = (sum_sq / window as f32).sqrt();
+                    (rms * 5.0).min(1.0)
+                }
+            };
+            let _ = app.emit("audio-level", level);
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+    });
+
+    Ok(())
 }
 
 /// Returns the current audio input level (0.0–1.0) for waveform animation.
+/// Kept as fallback; primary path is now the `audio-level` event emitted during recording.
 #[tauri::command]
 pub fn get_audio_level(state: State<'_, AppState>) -> f32 {
     match state.recorder.try_lock() {
         Ok(recorder) => recorder.audio_level(),
-        Err(_) => 0.0, // Mutex contention — return silence rather than blocking
+        Err(_) => 0.0,
     }
 }
 

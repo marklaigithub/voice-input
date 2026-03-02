@@ -55,7 +55,7 @@
           llmApplied = null
           await invoke('start_recording')
           // Start waveform animation + streaming transcription
-          startAudioLevelPolling()
+          startAudioLevelListener()
           startStreaming()
           // Notify indicator window
           await emit('recording-started')
@@ -65,7 +65,7 @@
           $appState = 'idle'
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
-        stopAudioLevelPolling()
+        stopAudioLevelListener()
         await stopStreaming()
         // Notify indicator window and hide it
         await emit('recording-stopped')
@@ -170,26 +170,21 @@
       .replace(/\+/g, ' ')
   }
 
-  // Audio level polling for waveform animation
+  // Audio level from backend event (emitted every ~80ms during recording)
   let audioLevel = $state(0)
-  let audioLevelInterval: ReturnType<typeof setInterval> | null = $state(null)
+  let unlistenAudioLevel: (() => void) | null = null
 
-  function startAudioLevelPolling() {
+  async function startAudioLevelListener() {
     audioLevel = 0
-    audioLevelInterval = setInterval(async () => {
-      try {
-        const level: number = await invoke('get_audio_level')
-        audioLevel = level
-      } catch {
-        audioLevel = 0
-      }
-    }, 80)
+    unlistenAudioLevel = await listen<number>('audio-level', (event) => {
+      audioLevel = event.payload
+    })
   }
 
-  function stopAudioLevelPolling() {
-    if (audioLevelInterval) {
-      clearInterval(audioLevelInterval)
-      audioLevelInterval = null
+  function stopAudioLevelListener() {
+    if (unlistenAudioLevel) {
+      unlistenAudioLevel()
+      unlistenAudioLevel = null
     }
     audioLevel = 0
   }

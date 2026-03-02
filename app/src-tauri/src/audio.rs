@@ -225,6 +225,11 @@ impl AudioRecorder {
         self.is_recording.load(Ordering::SeqCst)
     }
 
+    /// Returns clones of the shared Arcs needed by the audio level emitter thread.
+    pub fn level_emitter_refs(&self) -> (Arc<Mutex<Vec<f32>>>, Arc<AtomicBool>) {
+        (Arc::clone(&self.all_samples), Arc::clone(&self.is_recording))
+    }
+
     /// Returns the current audio input level as a value between 0.0 and 1.0.
     /// Computed as the RMS of the most recent ~0.1 seconds of recorded audio.
     pub fn audio_level(&self) -> f32 {
