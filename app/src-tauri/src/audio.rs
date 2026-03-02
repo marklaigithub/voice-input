@@ -70,15 +70,8 @@ impl AudioRecorder {
 
         // Log device info for debugging
         let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/voice-input-debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "[AUDIO] device='{}', rate={}Hz, channels={}, format={:?}",
-                device_name, self.sample_rate, channels, config.sample_format());
-        }
+        debug_log!("[AUDIO] device='{}', rate={}Hz, channels={}, format={:?}",
+            device_name, self.sample_rate, channels, config.sample_format());
 
         let samples = Arc::clone(&self.samples);
         let all_samples = Arc::clone(&self.all_samples);
@@ -221,16 +214,9 @@ impl AudioRecorder {
         let resampled = resample_to_16k(&raw_samples, self.sample_rate);
         let res_peak = resampled.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
 
-        // Write diagnostics to file since .app bundle has no stderr
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/voice-input-debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "[AUDIO] raw: {} samples at {}Hz, peak={:.6}", raw_samples.len(), self.sample_rate, raw_peak);
-            let _ = writeln!(f, "[AUDIO] resampled: {} samples at 16000Hz, peak={:.6}", resampled.len(), res_peak);
-        }
+        // Write diagnostics since .app bundle has no stderr
+        debug_log!("[AUDIO] raw: {} samples at {}Hz, peak={:.6}", raw_samples.len(), self.sample_rate, raw_peak);
+        debug_log!("[AUDIO] resampled: {} samples at 16000Hz, peak={:.6}", resampled.len(), res_peak);
 
         Ok(resampled)
     }
@@ -293,30 +279,15 @@ impl AudioRecorder {
         let threshold = (noise_floor * 5.0).max(0.001);
         let peak = raw_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
         if peak < threshold {
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/voice-input-debug.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "[AUDIO] chunk skipped: silence (peak={:.6}, threshold={:.6}, noise_floor={:.6})", peak, threshold, noise_floor);
-            }
+            debug_log!("[AUDIO] chunk skipped: silence (peak={:.6}, threshold={:.6}, noise_floor={:.6})", peak, threshold, noise_floor);
             // Put samples back so they aren't permanently lost
             buf.extend_from_slice(&raw_samples);
             return None; // Silence — don't transcribe
         }
 
         let resampled = resample_to_16k(&raw_samples, self.sample_rate);
-
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/voice-input-debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "[AUDIO] chunk: {} raw samples, {:.2}s, peak={:.6}, resampled to {} @ 16kHz",
-                raw_samples.len(), duration, peak, resampled.len());
-        }
+        debug_log!("[AUDIO] chunk: {} raw samples, {:.2}s, peak={:.6}, resampled to {} @ 16kHz",
+            raw_samples.len(), duration, peak, resampled.len());
 
         Some((resampled, duration))
     }

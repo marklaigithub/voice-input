@@ -1,3 +1,24 @@
+/// Debug logging macro — writes to /tmp/voice-input-debug.log in debug builds only.
+/// In release builds, all debug_log!() calls are compiled away to nothing.
+#[cfg(debug_assertions)]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {{
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/voice-input-debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, $($arg)*);
+        }
+    }};
+}
+
+#[cfg(not(debug_assertions))]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {{}};
+}
+
 pub mod audio;
 pub mod commands;
 pub mod config;

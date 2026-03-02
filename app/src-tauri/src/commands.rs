@@ -1,17 +1,6 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-fn debug_log(msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/voice-input-debug.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{}", msg);
-    }
-}
-
 use crate::{
     audio::AudioRecorder,
     config::AppConfig,
@@ -210,18 +199,10 @@ pub async fn stop_recording_and_transcribe(
         (samples, duration)
     };
 
-    // Debug: log audio stats to file
     {
         let peak = audio_samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/voice-input-debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "[CMD] stop_and_transcribe: samples={}, duration={:.2}s, peak={:.6}",
-                audio_samples.len(), duration_secs, peak);
-        }
+        debug_log!("[CMD] stop_and_transcribe: samples={}, duration={:.2}s, peak={:.6}",
+            audio_samples.len(), duration_secs, peak);
     }
 
     // -----------------------------------------------------------------------
@@ -258,11 +239,11 @@ pub async fn stop_recording_and_transcribe(
 
         match whisper.transcribe(&audio_samples, &language) {
             Ok(t) => {
-                debug_log(&format!("[CMD] transcribe OK: '{}'", t));
+                debug_log!("[CMD] transcribe OK: '{}'", t);
                 t
             }
             Err(e) => {
-                debug_log(&format!("[CMD] transcribe FAILED: {}", e));
+                debug_log!("[CMD] transcribe FAILED: {}", e);
                 return Err(e);
             }
         }
@@ -270,7 +251,7 @@ pub async fn stop_recording_and_transcribe(
 
     let text = text.trim().to_string();
     if text.is_empty() {
-        debug_log("[CMD] transcribe returned empty after trim");
+        debug_log!("[CMD] transcribe returned empty after trim");
         return Ok(String::new());
     }
 
@@ -278,19 +259,19 @@ pub async fn stop_recording_and_transcribe(
     // 4.5. LLM correction (no locks held during async call)
     // -----------------------------------------------------------------------
     let text = if llm_enabled {
-        debug_log(&format!("[CMD] LLM correction: model={}", llm_model));
+        debug_log!("[CMD] LLM correction: model={}", llm_model);
         let _ = app.emit("llm-correction-start", ());
         match crate::llm::correct_transcription(&text, &llm_endpoint, &llm_model).await {
             Ok(corrected) => {
                 let applied = corrected != text;
                 if applied {
-                    debug_log(&format!("[CMD] LLM: '{}' -> '{}'", text, corrected));
+                    debug_log!("[CMD] LLM: '{}' -> '{}'", text, corrected);
                 }
                 let _ = app.emit("llm-correction-done", applied);
                 corrected
             }
             Err(e) => {
-                debug_log(&format!("[CMD] LLM failed, using original: {}", e));
+                debug_log!("[CMD] LLM failed, using original: {}", e);
                 let _ = app.emit("llm-correction-done", false);
                 text
             }
@@ -299,7 +280,7 @@ pub async fn stop_recording_and_transcribe(
         text
     };
 
-    debug_log(&format!("[CMD] pasting text: '{}'", text));
+    debug_log!("[CMD] pasting text: '{}'", text);
 
     // -----------------------------------------------------------------------
     // 5. Paste into active application (fallback to clipboard if paste fails)
@@ -311,11 +292,11 @@ pub async fn stop_recording_and_transcribe(
             .map_err(|_| "Failed to lock paste manager".to_string())?;
 
         match paste.paste_text(&text) {
-            Ok(()) => debug_log("[CMD] paste OK"),
+            Ok(()) => debug_log!("[CMD] paste OK"),
             Err(e) => {
-                debug_log(&format!("[CMD] paste FAILED, fallback to clipboard: {}", e));
+                debug_log!("[CMD] paste FAILED, fallback to clipboard: {}", e);
                 if let Err(clip_err) = paste.clipboard_only(&text) {
-                    debug_log(&format!("[CMD] clipboard fallback FAILED: {}", clip_err));
+                    debug_log!("[CMD] clipboard fallback FAILED: {}", clip_err);
                 }
                 let _ = app.emit("paste-fallback", e);
             }
@@ -370,8 +351,8 @@ pub fn transcribe_chunk(
         }
     };
 
-    debug_log(&format!("[CMD] transcribe_chunk: samples={}, duration={:.2}s",
-        audio_samples.len(), duration_secs));
+    debug_log!("[CMD] transcribe_chunk: samples={}, duration={:.2}s",
+        audio_samples.len(), duration_secs);
 
     // 2. Read language from config
     let language = {
@@ -392,11 +373,11 @@ pub fn transcribe_chunk(
 
         match whisper.transcribe(&audio_samples, &language) {
             Ok(t) => {
-                debug_log(&format!("[CMD] chunk transcribe OK: '{}'", t));
+                debug_log!("[CMD] chunk transcribe OK: '{}'", t);
                 t
             }
             Err(e) => {
-                debug_log(&format!("[CMD] chunk transcribe FAILED: {}", e));
+                debug_log!("[CMD] chunk transcribe FAILED: {}", e);
                 return Err(e);
             }
         }
