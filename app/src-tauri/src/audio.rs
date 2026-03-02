@@ -239,6 +239,24 @@ impl AudioRecorder {
         self.is_recording.load(Ordering::SeqCst)
     }
 
+    /// Returns the current audio input level as a value between 0.0 and 1.0.
+    /// Computed as the RMS of the most recent ~0.1 seconds of recorded audio.
+    pub fn audio_level(&self) -> f32 {
+        let all = self.all_samples.lock().unwrap();
+        if all.is_empty() {
+            return 0.0;
+        }
+        // Take the last ~1600 samples (~0.1s at 16kHz raw rate, but actual
+        // sample rate may vary; this is a rough window that works well enough
+        // for a visual animation regardless of exact rate).
+        let window = 1600.min(all.len());
+        let tail = &all[all.len() - window..];
+        let sum_sq: f32 = tail.iter().map(|&s| s * s).sum();
+        let rms = (sum_sq / window as f32).sqrt();
+        // Normalize: typical speech RMS is ~0.05-0.15, clamp to 0..1
+        (rms * 5.0).min(1.0)
+    }
+
     pub fn duration_secs(&self) -> f64 {
         if self.sample_rate == 0 {
             return 0.0;
@@ -440,6 +458,87 @@ mod tests {
         let noise_floor = 0.0_f32.min(0.05);
         let threshold = (noise_floor * 5.0).max(0.001);
         assert!((threshold - 0.001).abs() < 1e-6);
+    }
+
+    // ── audio_level ─────────────────────────────────────────────────
+
+    #[test]
+    fn audio_level_empty_buffer_returns_zero() {
+        let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let all_samples = Arc::new(Mutex::new(Vec::new()));
+        let recorder = AudioRecorder {
+            samples,
+            all_samples,
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        };
+        assert_eq!(recorder.audio_level(), 0.0);
+    }
+
+    #[test]
+    fn audio_level_silence_near_zero() {
+        let all_samples = Arc::new(Mutex::new(vec![0.0f32; 1600]));
+        let recorder = AudioRecorder {
+            samples: Arc::new(Mutex::new(Vec::new())),
+            all_samples,
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        };
+        assert_eq!(recorder.audio_level(), 0.0);
+    }
+
+    #[test]
+    fn audio_level_loud_signal_clamped_to_one() {
+        // Constant 0.5 amplitude → RMS = 0.5, * 5.0 = 2.5 → clamped to 1.0
+        let all_samples = Arc::new(Mutex::new(vec![0.5f32; 1600]));
+        let recorder = AudioRecorder {
+            samples: Arc::new(Mutex::new(Vec::new())),
+            all_samples,
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        };
+        assert_eq!(recorder.audio_level(), 1.0);
+    }
+
+    #[test]
+    fn audio_level_moderate_signal() {
+        // Constant 0.1 amplitude → RMS = 0.1, * 5.0 = 0.5
+        let all_samples = Arc::new(Mutex::new(vec![0.1f32; 1600]));
+        let recorder = AudioRecorder {
+            samples: Arc::new(Mutex::new(Vec::new())),
+            all_samples,
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        };
+        let level = recorder.audio_level();
+        assert!((level - 0.5).abs() < 0.01, "Expected ~0.5, got {}", level);
+    }
+
+    #[test]
+    fn audio_level_uses_tail_only() {
+        // 3200 samples: first 1600 are silence, last 1600 are 0.1
+        let mut data = vec![0.0f32; 1600];
+        data.extend(vec![0.1f32; 1600]);
+        let all_samples = Arc::new(Mutex::new(data));
+        let recorder = AudioRecorder {
+            samples: Arc::new(Mutex::new(Vec::new())),
+            all_samples,
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        };
+        let level = recorder.audio_level();
+        // Should only see the 0.1 tail, not the silent head
+        assert!((level - 0.5).abs() < 0.01, "Expected ~0.5, got {}", level);
     }
 
     #[test]

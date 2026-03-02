@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Voice Input",
@@ -20,6 +21,18 @@
         "minHeight": 500,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "indicator",
+        "url": "/",
+        "width": 200,
+        "height": 56,
+        "visible": false,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true,
+        "resizable": false
       }
     ],
     "security": {

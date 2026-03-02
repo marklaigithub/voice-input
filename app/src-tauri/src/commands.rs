@@ -176,6 +176,15 @@ pub fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
     recorder.start_recording()
 }
 
+/// Returns the current audio input level (0.0–1.0) for waveform animation.
+#[tauri::command]
+pub fn get_audio_level(state: State<'_, AppState>) -> f32 {
+    match state.recorder.try_lock() {
+        Ok(recorder) => recorder.audio_level(),
+        Err(_) => 0.0, // Mutex contention — return silence rather than blocking
+    }
+}
+
 /// Stops recording, transcribes the audio with Whisper, pastes the result into
 /// the active application, adds the entry to history, and emits a
 /// `transcription-complete` event.

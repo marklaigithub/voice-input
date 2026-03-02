@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub llm_model: String,
     #[serde(default = "default_llm_endpoint")]
     pub llm_endpoint: String,
+    #[serde(default = "default_show_recording_indicator")]
+    pub show_recording_indicator: bool,
 }
 
 fn default_model_path() -> String {
@@ -68,6 +70,10 @@ fn default_llm_endpoint() -> String {
     "http://localhost:11434".to_string()
 }
 
+fn default_show_recording_indicator() -> bool {
+    true
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -81,6 +87,7 @@ impl Default for AppConfig {
             llm_enabled: default_llm_enabled(),
             llm_model: default_llm_model(),
             llm_endpoint: default_llm_endpoint(),
+            show_recording_indicator: default_show_recording_indicator(),
         }
     }
 }

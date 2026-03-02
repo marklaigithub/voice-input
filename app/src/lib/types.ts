@@ -9,6 +9,7 @@ export interface AppConfig {
   llm_enabled: boolean
   llm_model: string
   llm_endpoint: string
+  show_recording_indicator: boolean
 }
 
 export interface AppStatus {

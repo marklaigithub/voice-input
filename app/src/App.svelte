@@ -1,9 +1,11 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
-  import { listen } from '@tauri-apps/api/event'
+  import { listen, emit } from '@tauri-apps/api/event'
+  import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
   import { onMount } from 'svelte'
   import { appState, modelLoaded, config, history, lastTranscription, errorMessage } from './lib/store'
   import type { AppStatus, HistoryEntry } from './lib/types'
+  import AudioWaveform from './lib/AudioWaveform.svelte'
 
   let activeTab = $state<'status' | 'history' | 'settings'>('status')
 
@@ -52,14 +54,22 @@
           $appState = 'recording'
           llmApplied = null
           await invoke('start_recording')
-          // Start streaming transcription after a delay
+          // Start waveform animation + streaming transcription
+          startAudioLevelPolling()
           startStreaming()
+          // Notify indicator window
+          await emit('recording-started')
+          showIndicatorWindow()
         } catch (e) {
           $errorMessage = String(e)
           $appState = 'idle'
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
+        stopAudioLevelPolling()
         await stopStreaming()
+        // Notify indicator window and hide it
+        await emit('recording-stopped')
+        hideIndicatorWindow()
         try {
           $appState = 'transcribing'
           const text: string = await invoke('stop_recording_and_transcribe')
@@ -160,6 +170,42 @@
       .replace(/\+/g, ' ')
   }
 
+  // Audio level polling for waveform animation
+  let audioLevel = $state(0)
+  let audioLevelInterval: ReturnType<typeof setInterval> | null = $state(null)
+
+  function startAudioLevelPolling() {
+    audioLevel = 0
+    audioLevelInterval = setInterval(async () => {
+      try {
+        const level: number = await invoke('get_audio_level')
+        audioLevel = level
+      } catch {
+        audioLevel = 0
+      }
+    }, 80)
+  }
+
+  function stopAudioLevelPolling() {
+    if (audioLevelInterval) {
+      clearInterval(audioLevelInterval)
+      audioLevelInterval = null
+    }
+    audioLevel = 0
+  }
+
+  // Indicator window show/hide
+  function showIndicatorWindow() {
+    if (!$config?.show_recording_indicator) return
+    const win = WebviewWindow.getByLabel('indicator')
+    if (win) win.show()
+  }
+
+  function hideIndicatorWindow() {
+    const win = WebviewWindow.getByLabel('indicator')
+    if (win) win.hide()
+  }
+
   // Settings editing
   // Streaming transcription (preview only — no paste during recording)
   let streamingInterval: ReturnType<typeof setInterval> | null = $state(null)
@@ -227,6 +273,10 @@
     if ($config) saveConfig({ sound_enabled: !$config.sound_enabled })
   }
 
+  function toggleIndicator() {
+    if ($config) saveConfig({ show_recording_indicator: !$config.show_recording_indicator })
+  }
+
   function startEditLanguage() {
     languageInput = $config?.language ?? 'auto'
     editingLanguage = true
@@ -290,7 +340,11 @@
     {#if activeTab === 'status'}
       <div class="status-panel">
         <div class="big-status">
-          <div class="big-dot" style="background-color: {stateColor($appState)}"></div>
+          {#if $appState === 'recording'}
+            <AudioWaveform level={audioLevel} />
+          {:else}
+            <div class="big-dot" style="background-color: {stateColor($appState)}"></div>
+          {/if}
           <h2>{stateLabel($appState)}</h2>
         </div>
         {#if $lastTranscription}
@@ -361,6 +415,12 @@
           <span class="label-text">Sound effects</span>
           <button class="toggle" class:on={$config?.sound_enabled} onclick={toggleSound}>
             {$config?.sound_enabled ? 'On' : 'Off'}
+          </button>
+        </div>
+        <div class="setting-item">
+          <span class="label-text">Recording indicator</span>
+          <button class="toggle" class:on={$config?.show_recording_indicator} onclick={toggleIndicator}>
+            {$config?.show_recording_indicator ? 'On' : 'Off'}
           </button>
         </div>
         <div class="setting-item">

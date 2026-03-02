@@ -152,6 +152,7 @@ pub fn run() {
             commands::download_model,
             commands::init_whisper,
             commands::start_recording,
+            commands::get_audio_level,
             commands::stop_recording_and_transcribe,
             commands::transcribe_chunk,
             commands::get_history,
