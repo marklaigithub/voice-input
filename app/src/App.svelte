@@ -296,6 +296,35 @@
     }
   }
 
+  // Model download
+  let isDownloading = $state(false)
+  let downloadProgress = $state(0)
+  let downloadError = $state('')
+
+  async function startModelDownload() {
+    isDownloading = true
+    downloadProgress = 0
+    downloadError = ''
+
+    const unlisten = await listen<{ downloaded: number; total: number; percentage: number }>('model-download-progress', (event) => {
+      downloadProgress = Math.round(event.payload.percentage)
+    })
+
+    try {
+      await invoke('download_model')
+      // Download complete — load the model
+      $appState = 'loading'
+      await invoke('init_whisper')
+      $modelLoaded = true
+      $appState = 'idle'
+    } catch (e) {
+      downloadError = String(e)
+    } finally {
+      isDownloading = false
+      unlisten()
+    }
+  }
+
   async function toggleLlm() {
     if ($config) {
       await saveConfig({ llm_enabled: !$config.llm_enabled })
@@ -318,8 +347,12 @@
   <header>
     <div class="status-dot" style="background-color: {stateColor($appState)}"></div>
     <span class="status-text">{stateLabel($appState)}</span>
-    {#if !$modelLoaded}
+    {#if !$modelLoaded && !isDownloading}
       <span class="warning">Model not loaded</span>
+      <button class="download-btn" onclick={startModelDownload}>Download</button>
+    {/if}
+    {#if isDownloading}
+      <span class="download-info">Downloading... {downloadProgress}%</span>
     {/if}
   </header>
 
@@ -465,8 +498,23 @@
         {/if}
         <div class="setting-item">
           <span class="label-text">Model</span>
-          <span class="model-status" class:loaded={$modelLoaded}>{$modelLoaded ? 'Loaded' : 'Not loaded'}</span>
+          {#if isDownloading}
+            <div class="download-progress">
+              <div class="progress-bar">
+                <div class="progress-fill" style="width: {downloadProgress}%"></div>
+              </div>
+              <span class="progress-text">{downloadProgress}%</span>
+            </div>
+          {:else if $modelLoaded}
+            <span class="model-status loaded">Loaded</span>
+          {:else}
+            <span class="model-status">Not loaded</span>
+            <button class="download-btn" onclick={startModelDownload}>Download</button>
+          {/if}
         </div>
+        {#if downloadError}
+          <div class="setting-item error-text">{downloadError}</div>
+        {/if}
         <p class="settings-hint">Shortcuts can be changed in config.json</p>
       </div>
     {/if}
@@ -514,6 +562,61 @@
     margin-left: auto;
     font-size: 12px;
     color: #f59e0b;
+  }
+
+  .download-btn {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid #4ade80;
+    background: transparent;
+    color: #4ade80;
+    cursor: pointer;
+    margin-left: 6px;
+  }
+
+  .download-btn:hover {
+    background: rgba(74, 222, 128, 0.15);
+  }
+
+  .download-info {
+    margin-left: auto;
+    font-size: 12px;
+    color: #60a5fa;
+  }
+
+  .download-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .progress-bar {
+    flex: 1;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: #4ade80;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    font-size: 12px;
+    color: #60a5fa;
+    min-width: 36px;
+    text-align: right;
+  }
+
+  .error-text {
+    color: #f87171;
+    font-size: 12px;
   }
 
   .error-bar {

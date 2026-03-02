@@ -128,19 +128,16 @@ pub fn check_model(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(path.exists())
 }
 
-/// Triggers an async model download.
+/// Triggers an async model download with progress reporting.
 ///
-/// The actual download logic lives in `crate::model_downloader` (Phase 2).
-/// For now this emits a `download-progress` event with a placeholder and
-/// returns an error so the frontend knows the feature is not yet implemented.
+/// Downloads the Whisper model to the models directory, emitting
+/// `model-download-progress` events. Supports resume from partial downloads
+/// and verifies SHA256 on completion.
 #[tauri::command]
 pub async fn download_model(app: AppHandle) -> Result<(), String> {
-    // Phase 1 stub – emit a single progress event so the frontend wiring can
-    // be tested without requiring the real downloader.
-    app.emit("download-progress", serde_json::json!({ "progress": 0, "done": false }))
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
-
-    Err("Model download not yet implemented in this build".to_string())
+    let models_dir = crate::config::models_dir();
+    crate::model::download_model(&models_dir, &app).await?;
+    Ok(())
 }
 
 /// Loads the Whisper model into the engine from the path stored in config.
