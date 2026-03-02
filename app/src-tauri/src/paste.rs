@@ -3,6 +3,21 @@ use enigo::{Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
+/// Check if the process has macOS Accessibility permission (AX API).
+/// Returns false on non-macOS or if permission is not granted.
+#[cfg(target_os = "macos")]
+fn is_accessibility_trusted() -> bool {
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_accessibility_trusted() -> bool {
+    false
+}
+
 pub struct PasteManager {
     saved_text: Option<String>,
     has_saved: bool,
@@ -53,6 +68,13 @@ impl PasteManager {
             clipboard
                 .set_text(text)
                 .map_err(|e| format!("Clipboard set failed: {e}"))?;
+        }
+
+        // Check Accessibility permission before attempting keyboard simulation.
+        // Without this check, Enigo may crash the process (SIGABRT) instead of
+        // returning an error when CGEvent calls fail without AX permission.
+        if !is_accessibility_trusted() {
+            return Err("Accessibility permission not granted".to_string());
         }
 
         // Simulate Cmd+V
