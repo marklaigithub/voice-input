@@ -582,4 +582,259 @@ mod tests {
         let threshold = (noise_floor * 5.0).max(0.001);
         assert!((threshold - 0.25).abs() < 1e-6);
     }
+
+    // ── Helper: build AudioRecorder with injected state ─────────────
+
+    /// Creates a test AudioRecorder at 16kHz with pre-filled buffers.
+    /// At 16kHz: 0.5s = 8000 samples, 0.3s = 4800 samples.
+    fn test_recorder(
+        samples: Vec<f32>,
+        all_samples: Vec<f32>,
+        noise_floor: Option<f32>,
+    ) -> AudioRecorder {
+        AudioRecorder {
+            samples: Arc::new(Mutex::new(samples)),
+            all_samples: Arc::new(Mutex::new(all_samples)),
+            noise_floor: Arc::new(Mutex::new(noise_floor)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 16000,
+        }
+    }
+
+    // ── take_chunk boundary tests ───────────────────────────────────
+
+    #[test]
+    fn take_chunk_empty_returns_none() {
+        let mut rec = test_recorder(vec![], vec![], None);
+        assert!(rec.take_chunk().is_none());
+    }
+
+    #[test]
+    fn take_chunk_too_short_returns_none_and_preserves_samples() {
+        // 7999 samples = just under 0.5s at 16kHz
+        let data = vec![0.1; 7999];
+        let mut rec = test_recorder(data.clone(), vec![], None);
+
+        assert!(rec.take_chunk().is_none());
+
+        // Samples should be put back
+        let buf = rec.samples.lock().unwrap();
+        assert_eq!(buf.len(), 7999, "Samples must be preserved on too-short rejection");
+    }
+
+    #[test]
+    fn take_chunk_exactly_half_second_succeeds() {
+        // 8000 samples = exactly 0.5s at 16kHz, with audible signal
+        let data = vec![0.1; 8000];
+        let mut rec = test_recorder(data, vec![], Some(0.001));
+
+        let result = rec.take_chunk();
+        assert!(result.is_some(), "Exactly 0.5s should be accepted");
+
+        // samples buffer should be drained
+        let buf = rec.samples.lock().unwrap();
+        assert!(buf.is_empty(), "samples buffer should be drained after take_chunk");
+    }
+
+    #[test]
+    fn take_chunk_silence_returns_none_and_preserves_samples() {
+        // 8000 samples of near-silence (peak 0.0001), noise_floor 0.01
+        // threshold = max(0.01 * 5.0, 0.001) = 0.05, peak 0.0001 < 0.05
+        let data = vec![0.0001; 8000];
+        let mut rec = test_recorder(data, vec![], Some(0.01));
+
+        assert!(rec.take_chunk().is_none());
+
+        // Samples put back (silence rejection)
+        let buf = rec.samples.lock().unwrap();
+        assert_eq!(buf.len(), 8000, "Silent samples must be preserved (put back)");
+    }
+
+    #[test]
+    fn take_chunk_silence_then_speech_accumulates() {
+        // First: 8000 silent samples → rejected, put back
+        // Then: append 8000 speech samples → combined 16000 should succeed
+        let silent = vec![0.0001; 8000];
+        let mut rec = test_recorder(silent, vec![], Some(0.01));
+
+        assert!(rec.take_chunk().is_none()); // silence rejected
+
+        // Append speech samples to the buffer
+        {
+            let mut buf = rec.samples.lock().unwrap();
+            buf.extend(vec![0.2; 8000]); // speech-level signal
+        }
+
+        let result = rec.take_chunk();
+        assert!(result.is_some(), "Combined silence+speech chunk should be accepted (peak from speech)");
+
+        let (resampled, duration) = result.unwrap();
+        assert!(duration > 0.9, "Duration should cover both silent and speech portions");
+        assert!(!resampled.is_empty());
+    }
+
+    #[test]
+    fn take_chunk_does_not_drain_all_samples() {
+        // Verify dual-buffer design: take_chunk drains `samples` but NOT `all_samples`
+        let speech = vec![0.1; 16000]; // 1s
+        let mut rec = test_recorder(speech.clone(), speech.clone(), Some(0.001));
+
+        let result = rec.take_chunk();
+        assert!(result.is_some());
+
+        // samples: drained
+        let buf = rec.samples.lock().unwrap();
+        assert!(buf.is_empty());
+
+        // all_samples: untouched
+        let all = rec.all_samples.lock().unwrap();
+        assert_eq!(all.len(), 16000, "all_samples must NOT be drained by take_chunk");
+    }
+
+    #[test]
+    fn take_chunk_no_noise_floor_uses_minimum_threshold() {
+        // noise_floor = None → unwrap_or(0.0) → threshold = max(0.0, 0.001) = 0.001
+        // peak = 0.002 > 0.001 → should pass
+        let data = vec![0.002; 8000];
+        let mut rec = test_recorder(data, vec![], None);
+
+        assert!(rec.take_chunk().is_some(), "With no noise floor, very quiet speech (peak=0.002) should pass minimum threshold");
+    }
+
+    #[test]
+    fn take_chunk_noise_floor_cap_prevents_extreme_threshold() {
+        // noise_floor = 0.5 (extreme) → capped to 0.05 → threshold = 0.25
+        // Without cap: threshold would be 2.5, rejecting everything
+        let data = vec![0.3; 8000]; // peak = 0.3, above capped threshold 0.25
+        let mut rec = test_recorder(data, vec![], Some(0.5));
+
+        assert!(rec.take_chunk().is_some(), "Capped noise floor should allow normal speech through");
+    }
+
+    // ── take_remaining boundary tests ───────────────────────────────
+
+    #[test]
+    fn take_remaining_empty_returns_none() {
+        let mut rec = test_recorder(vec![], vec![], None);
+        assert!(rec.take_remaining().is_none());
+    }
+
+    #[test]
+    fn take_remaining_too_short_returns_none() {
+        // 4799 samples = just under 0.3s at 16kHz
+        let data = vec![0.1; 4799];
+        let mut rec = test_recorder(data, vec![], None);
+
+        assert!(rec.take_remaining().is_none(), "Under 0.3s should be discarded");
+
+        // Unlike take_chunk, take_remaining does NOT put samples back
+        let buf = rec.samples.lock().unwrap();
+        assert!(buf.is_empty(), "take_remaining drains even when rejecting (discard on stop)");
+    }
+
+    #[test]
+    fn take_remaining_exactly_threshold_succeeds() {
+        // 4800 samples = exactly 0.3s at 16kHz
+        let data = vec![0.1; 4800];
+        let mut rec = test_recorder(data, vec![], None);
+
+        let result = rec.take_remaining();
+        assert!(result.is_some(), "Exactly 0.3s should be accepted");
+    }
+
+    #[test]
+    fn take_remaining_no_silence_guard() {
+        // take_remaining should NOT check silence — pure silence should pass
+        // (unlike take_chunk which rejects silence)
+        let data = vec![0.0001; 8000]; // silence, 0.5s
+        let mut rec = test_recorder(data, vec![], Some(0.01));
+
+        assert!(rec.take_remaining().is_some(), "take_remaining should not apply silence guard");
+    }
+
+    #[test]
+    fn take_remaining_after_chunks_gets_leftover() {
+        // Simulate VAD flow: take_chunk drains most, take_remaining gets the tail
+        let speech = vec![0.1; 16000]; // 1s of speech
+        let mut rec = test_recorder(speech, vec![], Some(0.001));
+
+        // First chunk takes it all (1s > 0.5s minimum)
+        let chunk = rec.take_chunk();
+        assert!(chunk.is_some());
+
+        // Buffer is now empty
+        assert!(rec.take_remaining().is_none());
+
+        // Simulate more audio arriving after the chunk was taken
+        {
+            let mut buf = rec.samples.lock().unwrap();
+            buf.extend(vec![0.1; 6400]); // 0.4s — enough for take_remaining (>0.3s)
+        }
+
+        let remaining = rec.take_remaining();
+        assert!(remaining.is_some(), "Tail audio after last chunk should be captured");
+    }
+
+    // ── segment_ready flag ──────────────────────────────────────────
+
+    #[test]
+    fn segment_ready_flag_lifecycle() {
+        let rec = test_recorder(vec![], vec![], None);
+
+        assert!(!rec.is_segment_ready(), "Should start as false");
+
+        rec.segment_ready.store(true, Ordering::SeqCst);
+        assert!(rec.is_segment_ready());
+
+        rec.clear_segment_ready();
+        assert!(!rec.is_segment_ready(), "Should be false after clear");
+    }
+
+    // ── VAD threshold edge cases ────────────────────────────────────
+
+    #[test]
+    fn vad_threshold_boundary_values() {
+        // The VAD uses: threshold = max(noise_floor.min(0.05) * 2.0, 0.002)
+        // (from commands.rs — different formula than take_chunk's silence guard)
+
+        // Normal environment: noise_floor = 0.01
+        let nf = 0.01_f32.min(0.05);
+        let threshold = (nf * 2.0).max(0.002);
+        assert!((threshold - 0.02).abs() < 1e-6);
+
+        // Dead silent: noise_floor = 0.0
+        let nf = 0.0_f32.min(0.05);
+        let threshold = (nf * 2.0).max(0.002);
+        assert!((threshold - 0.002).abs() < 1e-6, "Should fall to minimum");
+
+        // Extremely noisy calibration: noise_floor = 0.3 → capped to 0.05
+        let nf = 0.3_f32.min(0.05);
+        let threshold = (nf * 2.0).max(0.002);
+        assert!((threshold - 0.1).abs() < 1e-6, "Cap should prevent extreme threshold");
+
+        // Edge: noise_floor exactly at cap: 0.05
+        let nf = 0.05_f32.min(0.05);
+        let threshold = (nf * 2.0).max(0.002);
+        assert!((threshold - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dual_threshold_difference() {
+        // VAD (commands.rs): max(nf * 2.0, 0.002) — more sensitive, detects speech onset
+        // take_chunk (audio.rs): max(nf * 5.0, 0.001) — stricter, rejects silent chunks
+        // A signal with RMS between the two thresholds triggers VAD but gets rejected by take_chunk
+        let nf = 0.01_f32;
+        let vad_threshold = (nf.min(0.05) * 2.0).max(0.002); // 0.02
+        let chunk_threshold = (nf.min(0.05) * 5.0).max(0.001); // 0.05
+
+        assert!(vad_threshold < chunk_threshold,
+            "VAD should be more sensitive than chunk silence guard");
+
+        // Signal at 0.03: triggers VAD (> 0.02) but rejected by chunk (< 0.05)
+        // This means VAD may fire but take_chunk returns None — a known design trade-off
+        let signal = 0.03;
+        assert!(signal > vad_threshold && signal < chunk_threshold);
+    }
 }
