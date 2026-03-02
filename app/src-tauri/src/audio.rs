@@ -9,6 +9,7 @@ pub struct AudioRecorder {
     all_samples: Arc<Mutex<Vec<f32>>>,
     noise_floor: Arc<Mutex<Option<f32>>>,
     is_recording: Arc<AtomicBool>,
+    segment_ready: Arc<AtomicBool>,
     stream: Option<cpal::Stream>,
     sample_rate: u32,
 }
@@ -36,6 +37,7 @@ impl AudioRecorder {
             all_samples: Arc::new(Mutex::new(Vec::new())),
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate,
         })
@@ -55,6 +57,7 @@ impl AudioRecorder {
             let mut nf = self.noise_floor.lock().unwrap();
             *nf = None;
         }
+        self.segment_ready.store(false, Ordering::SeqCst);
 
         let host = cpal::default_host();
         let device = host
@@ -225,9 +228,58 @@ impl AudioRecorder {
         self.is_recording.load(Ordering::SeqCst)
     }
 
-    /// Returns clones of the shared Arcs needed by the audio level emitter thread.
-    pub fn level_emitter_refs(&self) -> (Arc<Mutex<Vec<f32>>>, Arc<AtomicBool>) {
-        (Arc::clone(&self.all_samples), Arc::clone(&self.is_recording))
+    /// Returns clones of the shared Arcs needed by the background thread
+    /// (audio level emitter + VAD state machine).
+    pub fn background_thread_refs(
+        &self,
+    ) -> (
+        Arc<Mutex<Vec<f32>>>,
+        Arc<AtomicBool>,
+        Arc<Mutex<Option<f32>>>,
+        Arc<AtomicBool>,
+        u32,
+    ) {
+        (
+            Arc::clone(&self.all_samples),
+            Arc::clone(&self.is_recording),
+            Arc::clone(&self.noise_floor),
+            Arc::clone(&self.segment_ready),
+            self.sample_rate,
+        )
+    }
+
+    /// Returns true if VAD has detected a completed speech segment.
+    pub fn is_segment_ready(&self) -> bool {
+        self.segment_ready.load(Ordering::SeqCst)
+    }
+
+    /// Resets the segment_ready flag after the segment has been processed.
+    pub fn clear_segment_ready(&self) {
+        self.segment_ready.store(false, Ordering::SeqCst);
+    }
+
+    /// Take remaining audio from the samples buffer for the tail segment.
+    /// Uses a lower minimum duration (0.3s) than take_chunk (0.5s) since
+    /// the tail may be shorter. No silence detection — let Whisper decide.
+    pub fn take_remaining(&mut self) -> Option<(Vec<f32>, f64)> {
+        let mut buf = self.samples.lock().unwrap();
+        if buf.is_empty() {
+            return None;
+        }
+        let raw_samples: Vec<f32> = buf.drain(..).collect();
+        let duration = raw_samples.len() as f64 / self.sample_rate as f64;
+        if duration < 0.3 {
+            // Too short to transcribe meaningfully; discard since we're stopping
+            return None;
+        }
+        let resampled = resample_to_16k(&raw_samples, self.sample_rate);
+        debug_log!(
+            "[AUDIO] remaining: {} raw samples, {:.2}s, resampled to {} @ 16kHz",
+            raw_samples.len(),
+            duration,
+            resampled.len()
+        );
+        Some((resampled, duration))
     }
 
     /// Returns the current audio input level as a value between 0.0 and 1.0.
@@ -447,6 +499,7 @@ mod tests {
             all_samples,
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate: 16000,
         };
@@ -461,6 +514,7 @@ mod tests {
             all_samples,
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate: 16000,
         };
@@ -476,6 +530,7 @@ mod tests {
             all_samples,
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate: 16000,
         };
@@ -491,6 +546,7 @@ mod tests {
             all_samples,
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate: 16000,
         };
@@ -509,6 +565,7 @@ mod tests {
             all_samples,
             noise_floor: Arc::new(Mutex::new(None)),
             is_recording: Arc::new(AtomicBool::new(false)),
+            segment_ready: Arc::new(AtomicBool::new(false)),
             stream: None,
             sample_rate: 16000,
         };

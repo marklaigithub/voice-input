@@ -33,6 +33,10 @@ arboard = "3"
 # Keyboard simulation
 enigo = { version = "0.3", features = ["serde"] }
 
+# macOS: CGEvent with explicit modifier flags for paste (avoids held-key interference)
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+
 # Audio file reading
 hound = "3.5"
 

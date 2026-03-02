@@ -54,9 +54,9 @@
           $appState = 'recording'
           llmApplied = null
           await invoke('start_recording')
-          // Start waveform animation + streaming transcription
+          // Start waveform animation + VAD-driven segment transcription
           startAudioLevelListener()
-          startStreaming()
+          startVadListener()
           // Notify indicator window
           await emit('recording-started')
           await showIndicatorWindow()
@@ -70,7 +70,7 @@
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
         stopAudioLevelListener()
-        await stopStreaming()
+        await stopVadListener()
         // Notify indicator window and hide it
         await emit('recording-stopped')
         await hideIndicatorWindow()
@@ -220,43 +220,41 @@
   }
 
   // Settings editing
-  // Streaming transcription (preview only — no paste during recording)
-  let streamingInterval: ReturnType<typeof setInterval> | null = $state(null)
-  let streamingChunks = $state(0)
-  let pendingChunk: Promise<void> | null = $state(null)
-  const CHUNK_INTERVAL_MS = 6000 // transcribe every 6 seconds
+  // VAD-driven segment transcription — replaces the old 6s polling.
+  // When the backend detects a speech pause (800ms silence), it emits
+  // 'speech-segment-ready'. We transcribe + paste each segment immediately.
+  let unlistenVad: (() => void) | null = $state(null)
+  let pendingSegment: Promise<void> | null = $state(null)
 
-  function startStreaming() {
-    streamingChunks = 0
-    streamingInterval = setInterval(() => {
-      // Skip if previous chunk is still being transcribed (re-entry guard)
-      if (pendingChunk) return
+  async function startVadListener() {
+    unlistenVad = await listen('speech-segment-ready', () => {
+      // Skip if previous segment is still being transcribed (re-entry guard)
+      if (pendingSegment) return
 
       const promise = (async () => {
         try {
-          const result: string | null = await invoke('transcribe_chunk')
+          const result: string | null = await invoke('transcribe_and_paste_segment')
           if (result) {
-            streamingChunks++
             $lastTranscription = result
           }
         } catch (e) {
-          console.warn('Chunk transcription failed:', e)
+          console.warn('Segment transcription failed:', e)
         }
       })()
-      pendingChunk = promise
-      promise.then(() => { if (pendingChunk === promise) pendingChunk = null })
-    }, CHUNK_INTERVAL_MS)
+      pendingSegment = promise
+      promise.then(() => { if (pendingSegment === promise) pendingSegment = null })
+    })
   }
 
-  async function stopStreaming() {
-    if (streamingInterval) {
-      clearInterval(streamingInterval)
-      streamingInterval = null
+  async function stopVadListener() {
+    if (unlistenVad) {
+      unlistenVad()
+      unlistenVad = null
     }
-    // Wait for any in-flight chunk to finish before stop_recording_and_transcribe
-    if (pendingChunk) {
-      await pendingChunk
-      pendingChunk = null
+    // Wait for any in-flight segment to finish before stop_recording_and_transcribe
+    if (pendingSegment) {
+      await pendingSegment
+      pendingSegment = null
     }
   }
 

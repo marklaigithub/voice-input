@@ -94,6 +94,7 @@ pub fn run() {
                     max_history,
                 )),
                 processing: std::sync::atomic::AtomicBool::new(false),
+                segments_pasted: std::sync::Mutex::new(Vec::new()),
             };
             app.manage(state);
 
@@ -181,6 +182,7 @@ pub fn run() {
             commands::get_audio_level,
             commands::stop_recording_and_transcribe,
             commands::transcribe_chunk,
+            commands::transcribe_and_paste_segment,
             commands::get_history,
             commands::clear_history,
             commands::transcribe_file,

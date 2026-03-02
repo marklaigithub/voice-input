@@ -1,5 +1,4 @@
 use arboard::Clipboard;
-use enigo::{Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
@@ -16,6 +15,61 @@ fn is_accessibility_trusted() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn is_accessibility_trusted() -> bool {
     false
+}
+
+/// Simulate Cmd+V using CGEvent with explicit modifier flags.
+///
+/// Uses `CGEvent::set_flags(CGEventFlagCommand)` so that only the Command modifier
+/// is set on the keystroke event, regardless of which physical keys are held.
+/// This is critical for paste-during-recording: the user holds ⌘⇧Space for the talk
+/// shortcut, and enigo would inherit the physical Shift flag, turning Cmd+V into
+/// Cmd+Shift+V (which most apps interpret differently or ignore).
+#[cfg(target_os = "macos")]
+fn simulate_cmd_v() -> Result<(), String> {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source_down = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Failed to create CGEventSource")?;
+
+    // kVK_ANSI_V = 0x09
+    let v_keycode: u16 = 9;
+
+    // Key down with ONLY Command modifier
+    let event_down = CGEvent::new_keyboard_event(source_down, v_keycode, true)
+        .map_err(|_| "Failed to create key-down event")?;
+    event_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    event_down.post(CGEventTapLocation::HID);
+
+    // Key up with ONLY Command modifier
+    let source_up = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| "Failed to create CGEventSource")?;
+    let event_up = CGEvent::new_keyboard_event(source_up, v_keycode, false)
+        .map_err(|_| "Failed to create key-up event")?;
+    event_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    event_up.post(CGEventTapLocation::HID);
+
+    Ok(())
+}
+
+/// Fallback: simulate Cmd+V using enigo (non-macOS platforms).
+#[cfg(not(target_os = "macos"))]
+fn simulate_cmd_v() -> Result<(), String> {
+    use enigo::{Enigo, Key, Keyboard, Settings};
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init failed: {e}"))?;
+    enigo
+        .key(Key::Meta, enigo::Direction::Press)
+        .map_err(|e| format!("Key press failed: {e}"))?;
+    let click_result = enigo
+        .key(Key::Unicode('v'), enigo::Direction::Click)
+        .map_err(|e| format!("Key click failed: {e}"));
+    let release_result = enigo
+        .key(Key::Meta, enigo::Direction::Release)
+        .map_err(|e| format!("Key release failed: {e}"));
+    click_result?;
+    release_result?;
+    Ok(())
 }
 
 pub struct PasteManager;
@@ -59,24 +113,10 @@ impl PasteManager {
             return Err("Accessibility permission not granted".to_string());
         }
 
-        // 4. Simulate Cmd+V
-        //    IMPORTANT: Always release Meta key even if the V click fails,
-        //    otherwise the system Cmd key stays stuck.
-        let mut enigo =
-            Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init failed: {e}"))?;
+        // 4. Simulate Cmd+V with explicit modifier flags
+        //    Uses CGEvent on macOS to avoid held-key interference (e.g., ⌘⇧Space).
         thread::sleep(Duration::from_millis(50));
-        enigo
-            .key(Key::Meta, enigo::Direction::Press)
-            .map_err(|e| format!("Key press failed: {e}"))?;
-        let click_result = enigo
-            .key(Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| format!("Key click failed: {e}"));
-        let release_result = enigo
-            .key(Key::Meta, enigo::Direction::Release)
-            .map_err(|e| format!("Key release failed: {e}"));
-        // Propagate errors after ensuring Release ran
-        click_result?;
-        release_result?;
+        simulate_cmd_v()?;
 
         // 5. Wait for the paste to be consumed by the target app, then restore.
         thread::sleep(Duration::from_millis(150));

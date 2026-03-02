@@ -43,6 +43,9 @@ pub struct AppState {
     /// Guards the entire record→transcribe→paste pipeline.
     /// Prevents a new recording from starting while the previous one is still processing.
     pub processing: std::sync::atomic::AtomicBool,
+    /// Accumulates text from VAD-triggered segment transcriptions during recording.
+    /// Cleared at the start of each recording and consumed when recording stops.
+    pub segments_pasted: std::sync::Mutex<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +66,41 @@ pub struct LlmStatus {
     pub model_available: bool,
     pub enabled: bool,
     pub model: String,
+}
+
+// ---------------------------------------------------------------------------
+// Paste helper — shared by stop pipeline and segment transcription
+// ---------------------------------------------------------------------------
+
+/// Pastes text into the active application via the main thread.
+/// Falls back to clipboard-only on failure, emitting a `paste-fallback` event.
+fn do_paste(app: &AppHandle, text: &str, paste_lock: &std::sync::Mutex<PasteManager>) {
+    let text_for_paste = text.to_string();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+
+    let dispatched = app.run_on_main_thread(move || {
+        let mut paste_mgr = crate::paste::PasteManager::new();
+        let _ = tx.send(paste_mgr.paste_text(&text_for_paste));
+    });
+
+    let paste_result = if dispatched.is_ok() {
+        rx.recv().unwrap_or(Err("Paste channel closed".to_string()))
+    } else {
+        Err("Failed to dispatch to main thread".to_string())
+    };
+
+    match paste_result {
+        Ok(()) => debug_log!("[CMD] paste OK"),
+        Err(e) => {
+            debug_log!("[CMD] paste FAILED, fallback to clipboard: {}", e);
+            if let Ok(paste) = paste_lock.lock() {
+                if let Err(clip_err) = paste.clipboard_only(text) {
+                    debug_log!("[CMD] clipboard fallback FAILED: {}", clip_err);
+                }
+            }
+            let _ = app.emit("paste-fallback", e);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -197,26 +235,84 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     recorder.start_recording()?;
     set_tray_recording(&app, true);
 
-    // Spawn audio level emitter — thread exits when is_recording becomes false.
-    let (all_samples, is_recording) = recorder.level_emitter_refs();
+    // Clear segments from any previous recording
+    if let Ok(mut sp) = state.segments_pasted.lock() {
+        sp.clear();
+    }
+
+    // Spawn background thread: audio level emitter + VAD state machine.
+    // Thread exits when is_recording becomes false.
+    let (all_samples, is_recording, noise_floor, segment_ready, sample_rate) =
+        recorder.background_thread_refs();
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        // VAD state machine
+        #[derive(Debug)]
+        enum VadState {
+            Silent,
+            Speaking,
+            Trailing(Instant),
+        }
+        let mut vad_state = VadState::Silent;
+        const TRAILING_DURATION_MS: u128 = 800;
+
+        debug_log!("[VAD] background thread started, sample_rate={}", sample_rate);
+
         while is_recording.load(Ordering::SeqCst) {
-            let level = {
+            // Compute RMS of recent ~0.1s window
+            let rms = {
                 let all = all_samples.lock().unwrap();
                 if all.is_empty() {
                     0.0f32
                 } else {
-                    let window = 1600.min(all.len());
+                    let window = (sample_rate as usize / 10).min(all.len());
                     let tail = &all[all.len() - window..];
                     let sum_sq: f32 = tail.iter().map(|&s| s * s).sum();
-                    let rms = (sum_sq / window as f32).sqrt();
-                    (rms * 5.0).min(1.0)
+                    (sum_sq / window as f32).sqrt()
                 }
             };
+
+            // Emit audio level for waveform animation (normalized 0..1)
+            let level = (rms * 5.0).min(1.0);
             let _ = app.emit("audio-level", level);
+
+            // VAD: compare RMS against dynamic threshold derived from noise floor
+            let nf = noise_floor.lock().unwrap().unwrap_or(0.0).min(0.05);
+            let vad_threshold = (nf * 2.0).max(0.002);
+            let is_speech = rms > vad_threshold;
+
+            match &vad_state {
+                VadState::Silent => {
+                    if is_speech {
+                        debug_log!("[VAD] speech started (rms={:.4}, threshold={:.4})", rms, vad_threshold);
+                        vad_state = VadState::Speaking;
+                    }
+                }
+                VadState::Speaking => {
+                    if !is_speech {
+                        debug_log!("[VAD] speech trailing");
+                        vad_state = VadState::Trailing(Instant::now());
+                    }
+                }
+                VadState::Trailing(since) => {
+                    if is_speech {
+                        debug_log!("[VAD] speech resumed (cancelled trailing)");
+                        vad_state = VadState::Speaking;
+                    } else if since.elapsed().as_millis() >= TRAILING_DURATION_MS {
+                        debug_log!("[VAD] segment ready (trailing {}ms)", since.elapsed().as_millis());
+                        segment_ready.store(true, Ordering::SeqCst);
+                        let _ = app.emit("speech-segment-ready", ());
+                        vad_state = VadState::Silent;
+                    }
+                }
+            }
+
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
+
+        debug_log!("[VAD] background thread stopped");
     });
 
     Ok(())
@@ -261,7 +357,22 @@ async fn stop_recording_pipeline(
     state: &State<'_, AppState>,
 ) -> Result<String, String> {
     // -----------------------------------------------------------------------
-    // 1. Stop recording and collect audio samples
+    // 0. Check for VAD segments — if present, use segmented path
+    // -----------------------------------------------------------------------
+    let segments: Vec<String> = {
+        let mut sp = state
+            .segments_pasted
+            .lock()
+            .map_err(|_| "Failed to lock segments".to_string())?;
+        sp.drain(..).collect()
+    };
+
+    if !segments.is_empty() {
+        return segmented_stop_pipeline(app, state, segments).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Stop recording and collect audio samples (original path — no VAD)
     //    Lock is taken and released immediately so later locks don't deadlock.
     // -----------------------------------------------------------------------
     let (audio_samples, duration_secs) = {
@@ -372,37 +483,7 @@ async fn stop_recording_pipeline(
     //    MUST run on main thread — enigo calls TSMGetInputSourceProperty
     //    (macOS Text Services Manager) which asserts main dispatch queue.
     // -----------------------------------------------------------------------
-    {
-        let text_for_paste = text.clone();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
-
-        let dispatched = app.run_on_main_thread(move || {
-            let mut paste_mgr = crate::paste::PasteManager::new();
-            let _ = tx.send(paste_mgr.paste_text(&text_for_paste));
-        });
-
-        let paste_result = if dispatched.is_ok() {
-            rx.recv().unwrap_or(Err("Paste channel closed".to_string()))
-        } else {
-            Err("Failed to dispatch to main thread".to_string())
-        };
-
-        match paste_result {
-            Ok(()) => debug_log!("[CMD] paste OK"),
-            Err(e) => {
-                debug_log!("[CMD] paste FAILED, fallback to clipboard: {}", e);
-                // clipboard_only doesn't need main thread
-                let paste = state
-                    .paste
-                    .lock()
-                    .map_err(|_| "Failed to lock paste manager".to_string())?;
-                if let Err(clip_err) = paste.clipboard_only(&text) {
-                    debug_log!("[CMD] clipboard fallback FAILED: {}", clip_err);
-                }
-                let _ = app.emit("paste-fallback", e);
-            }
-        }
-    }
+    do_paste(app, &text, &state.paste);
 
     // -----------------------------------------------------------------------
     // 6. Add to history
@@ -440,7 +521,7 @@ pub fn transcribe_chunk(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
     // 1. Take chunk from recorder (while still recording)
-    let (audio_samples, duration_secs) = {
+    let (audio_samples, _duration) = {
         let mut recorder = state
             .recorder
             .lock()
@@ -453,7 +534,7 @@ pub fn transcribe_chunk(
     };
 
     debug_log!("[CMD] transcribe_chunk: samples={}, duration={:.2}s",
-        audio_samples.len(), duration_secs);
+        audio_samples.len(), _duration);
 
     // 2. Read language from config
     let language = {
@@ -627,4 +708,210 @@ pub async fn check_llm_status(state: State<'_, AppState>) -> Result<LlmStatus, S
         enabled,
         model,
     })
+}
+
+// ---------------------------------------------------------------------------
+// VAD segment transcription
+// ---------------------------------------------------------------------------
+
+/// Transcribes the current speech segment detected by VAD and pastes it immediately.
+/// Called by the frontend when a `speech-segment-ready` event is received.
+/// Returns the transcribed text, or None if there wasn't enough audio.
+#[tauri::command]
+pub async fn transcribe_and_paste_segment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    // 1. Take audio chunk from recorder (while still recording)
+    let (audio_samples, _duration) = {
+        let mut recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "Failed to lock recorder".to_string())?;
+
+        recorder.clear_segment_ready();
+
+        match recorder.take_chunk() {
+            Some(chunk) => chunk,
+            None => return Ok(None),
+        }
+    };
+
+    debug_log!(
+        "[CMD] transcribe_segment: samples={}, duration={:.2}s",
+        audio_samples.len(),
+        _duration
+    );
+
+    // 2. Read language from config
+    let language = {
+        state
+            .config
+            .lock()
+            .map_err(|_| "Failed to lock config".to_string())?
+            .language
+            .clone()
+    };
+
+    // 3. Transcribe (no LLM — would add too much latency for real-time segments)
+    let text = {
+        let whisper = state
+            .whisper
+            .lock()
+            .map_err(|_| "Failed to lock whisper".to_string())?;
+
+        let transcribe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            whisper.transcribe(&audio_samples, &language)
+        }));
+
+        match transcribe_result {
+            Ok(Ok(t)) => {
+                debug_log!("[CMD] segment transcribe OK: '{}'", t);
+                t
+            }
+            Ok(Err(e)) => {
+                debug_log!("[CMD] segment transcribe FAILED: {}", e);
+                return Err(e);
+            }
+            Err(_panic) => {
+                debug_log!("[CMD] segment transcribe PANICKED");
+                return Err("轉錄時發生內部錯誤".to_string());
+            }
+        }
+    };
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+
+    // 4. Paste immediately
+    do_paste(&app, &text, &state.paste);
+
+    // 5. Store segment text for history assembly when recording stops
+    {
+        let mut sp = state
+            .segments_pasted
+            .lock()
+            .map_err(|_| "Failed to lock segments".to_string())?;
+        sp.push(text.clone());
+    }
+
+    debug_log!("[CMD] segment pasted and stored: '{}'", text);
+
+    Ok(Some(text))
+}
+
+/// Handles the stop pipeline when VAD segments were pasted during recording.
+/// Transcribes any remaining tail audio, combines all segments, saves history.
+async fn segmented_stop_pipeline(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    segments: Vec<String>,
+) -> Result<String, String> {
+    debug_log!(
+        "[CMD] segmented stop: {} segments already pasted",
+        segments.len()
+    );
+
+    // 1. Take remaining audio from samples buffer + stop recording
+    let (remaining_audio, duration_secs) = {
+        let mut recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "Failed to lock recorder".to_string())?;
+
+        let remaining = recorder.take_remaining();
+        let duration = recorder.duration_secs();
+        // Stop recording to release the mic (return value ignored — we don't
+        // need the full all_samples since segments were already transcribed).
+        let _ = recorder.stop_recording();
+        (remaining, duration)
+    };
+
+    // 2. Transcribe remaining tail if any
+    let tail_text = if let Some((audio_samples, _tail_dur)) = remaining_audio {
+        debug_log!(
+            "[CMD] segmented tail: {} samples, {:.2}s",
+            audio_samples.len(),
+            _tail_dur
+        );
+
+        let language = {
+            state
+                .config
+                .lock()
+                .map_err(|_| "Failed to lock config".to_string())?
+                .language
+                .clone()
+        };
+
+        let whisper = state
+            .whisper
+            .lock()
+            .map_err(|_| "Failed to lock whisper".to_string())?;
+
+        let transcribe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            whisper.transcribe(&audio_samples, &language)
+        }));
+
+        match transcribe_result {
+            Ok(Ok(t)) => {
+                let t = t.trim().to_string();
+                debug_log!("[CMD] segmented tail transcribe OK: '{}'", t);
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            }
+            Ok(Err(e)) => {
+                debug_log!("[CMD] segmented tail transcribe FAILED: {}", e);
+                None // Don't fail the whole pipeline for tail
+            }
+            Err(_panic) => {
+                debug_log!("[CMD] segmented tail transcribe PANICKED");
+                None
+            }
+        }
+    } else {
+        debug_log!("[CMD] segmented stop: no remaining tail audio");
+        None
+    };
+
+    // 3. Paste tail if present
+    if let Some(ref text) = tail_text {
+        do_paste(app, text, &state.paste);
+    }
+
+    // 4. Combine all segment texts + tail into full text
+    let mut full_text = segments.join("");
+    if let Some(t) = tail_text {
+        full_text.push_str(&t);
+    }
+
+    debug_log!("[CMD] segmented full text: '{}'", full_text);
+
+    // 5. Add combined text to history as a single entry
+    if !full_text.is_empty() {
+        let entry = HistoryEntry {
+            timestamp: chrono::Local::now(),
+            text: full_text.clone(),
+            source: TranscriptionSource::PressToTalk,
+            duration_secs,
+        };
+
+        let mut history = state
+            .history
+            .lock()
+            .map_err(|_| "Failed to lock history".to_string())?;
+
+        history.add(entry);
+    }
+
+    // 6. Emit event so UI components can react
+    app.emit("transcription-complete", full_text.clone())
+        .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    Ok(full_text)
 }
