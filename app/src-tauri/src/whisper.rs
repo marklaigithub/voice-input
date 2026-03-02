@@ -138,27 +138,36 @@ fn normalize_audio(audio: &[f32]) -> Vec<f32> {
 /// Known Whisper hallucination patterns (especially in Chinese).
 /// These appear when Whisper processes silence or low-energy audio.
 fn filter_hallucinations(text: &str) -> String {
+    // Whisper commonly hallucinates YouTube-style outros, subtitle credits,
+    // and social media calls-to-action when given silence or noise.
+    // Patterns are listed in pairs: 繁體 + 簡體 where applicable.
     let hallucination_patterns = [
-        "請不吝點贊",
-        "訂閱轉發",
-        "打賞支持",
+        // 訂閱/關注相關
+        "訂閱我的頻道",  "订阅我的频道",
+        "歡迎訂閱",      "欢迎订阅",
+        "訂閱轉發",      "订阅转发",
+        "請大家關注",    "请大家关注",
+        // 按讚/點贊相關
+        "請不吝點贊",    "请不吝点赞",
+        "打賞支持",      "打赏支持",
+        // 感謝/結尾語
+        "感謝觀看",      "感谢观看",
+        "謝謝大家",      "谢谢大家",
+        "謝謝收看",      "谢谢收看",
+        "感謝收聽",      "感谢收听",
+        "我們下次見",    "我们下次见",
+        "下次再見",      "下次再见",
+        // 字幕相關
+        "字幕由",        "字幕提供",
+        "字幕製作",      "字幕制作",
+        "本字幕",
+        // 其他常見幻覺
         "明鏡與點點",
-        "字幕由",
-        "字幕提供",
-        "感謝觀看",
-        "感谢观看",
-        "谢谢大家",
-        "謝謝大家",
+        // 英文幻覺
         "Thank you for watching",
         "Thanks for watching",
         "Subtitles by",
         "Subscribe",
-        "请不吝点赞",
-        "訂閱我的頻道",
-        "謝謝收看",
-        "谢谢收看",
-        "歡迎訂閱",
-        "欢迎订阅",
     ];
 
     let trimmed = text.trim();
@@ -169,14 +178,20 @@ fn filter_hallucinations(text: &str) -> String {
     }
 
     // Remove language tags that Whisper inserts in single-language mode
-    // e.g., (英文), (日文), (音樂), (掌聲), [音樂], [BLANK_AUDIO]
-    let cleaned = trimmed
-        .replace("(英文)", "")
-        .replace("(日文)", "")
-        .replace("(音樂)", "")
-        .replace("(掌聲)", "")
-        .replace("[音樂]", "")
-        .replace("[BLANK_AUDIO]", "");
+    // e.g., (英文), (音樂), [音樂], [BLANK_AUDIO]
+    // Listed in 繁體 + 簡體 pairs
+    let tag_patterns = [
+        "(英文)", "(日文)", "(中文)", "(韓文)",
+        "(音樂)", "(音乐)", "(掌聲)", "(掌声)",
+        "(笑聲)", "(笑声)", "(鼓掌)", "(歡呼)", "(欢呼)",
+        "[音樂]", "[音乐]", "[掌聲]", "[掌声]",
+        "[BLANK_AUDIO]", "[MUSIC]",
+    ];
+
+    let mut cleaned = trimmed.to_string();
+    for tag in &tag_patterns {
+        cleaned = cleaned.replace(tag, "");
+    }
 
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
