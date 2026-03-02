@@ -323,7 +323,7 @@ impl AudioRecorder {
 }
 
 /// Convert interleaved multi-channel audio to mono by averaging all channels.
-fn stereo_to_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
+pub fn stereo_to_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return data.to_vec();
     }

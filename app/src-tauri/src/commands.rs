@@ -435,11 +435,66 @@ pub fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Transcribes a WAV file at the given path.
 ///
-/// Phase 2 stub – the file is not yet read or decoded; this command exists
-/// so that the frontend IPC wiring can be established in Phase 1.
+/// Reads the WAV, converts to mono f32, resamples to 16kHz, then runs Whisper.
+/// Supports standard WAV formats: 16-bit int, 24-bit int, 32-bit float.
 #[tauri::command]
-pub fn transcribe_file(_path: String, _state: State<'_, AppState>) -> Result<String, String> {
-    Err("File transcription is not yet implemented in this build".to_string())
+pub fn transcribe_file(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    // 1. Read WAV file
+    let reader = hound::WavReader::open(&path)
+        .map_err(|e| format!("無法開啟音訊檔案：{}", e))?;
+
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+    let channels = spec.channels as usize;
+
+    // 2. Convert samples to f32
+    let samples_f32: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Float, _) => {
+            reader.into_samples::<f32>()
+                .map(|s| s.map_err(|e| format!("讀取樣本失敗：{}", e)))
+                .collect::<Result<Vec<f32>, String>>()?
+        }
+        (hound::SampleFormat::Int, 16) => {
+            reader.into_samples::<i16>()
+                .map(|s| s.map(|v| v as f32 / i16::MAX as f32)
+                    .map_err(|e| format!("讀取樣本失敗：{}", e)))
+                .collect::<Result<Vec<f32>, String>>()?
+        }
+        (hound::SampleFormat::Int, 24) => {
+            reader.into_samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / 8_388_607.0) // 2^23 - 1
+                    .map_err(|e| format!("讀取樣本失敗：{}", e)))
+                .collect::<Result<Vec<f32>, String>>()?
+        }
+        _ => return Err(format!("不支援的音訊格式：{}-bit {:?}", spec.bits_per_sample, spec.sample_format)),
+    };
+
+    if samples_f32.is_empty() {
+        return Err("音訊檔案是空的".to_string());
+    }
+
+    // 3. Convert to mono
+    let mono = crate::audio::stereo_to_mono_f32(&samples_f32, channels);
+
+    // 4. Resample to 16kHz
+    let resampled = crate::audio::resample_to_16k(&mono, sample_rate);
+
+    // 5. Read language from config
+    let language = state
+        .config
+        .lock()
+        .map_err(|_| "Failed to lock config".to_string())?
+        .language
+        .clone();
+
+    // 6. Transcribe
+    let whisper = state
+        .whisper
+        .lock()
+        .map_err(|_| "Failed to lock whisper".to_string())?;
+
+    let text = whisper.transcribe(&resampled, &language)?;
+    Ok(text.trim().to_string())
 }
 
 /// Returns whether the Whisper engine is currently busy transcribing.
