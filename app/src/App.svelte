@@ -59,7 +59,7 @@
           startStreaming()
           // Notify indicator window
           await emit('recording-started')
-          showIndicatorWindow()
+          await showIndicatorWindow()
         } catch (e) {
           $errorMessage = String(e)
           $appState = 'idle'
@@ -69,7 +69,7 @@
         await stopStreaming()
         // Notify indicator window and hide it
         await emit('recording-stopped')
-        hideIndicatorWindow()
+        await hideIndicatorWindow()
         try {
           $appState = 'transcribing'
           const text: string = await invoke('stop_recording_and_transcribe')
@@ -194,11 +194,11 @@
     if (!$config?.show_recording_indicator) return
     const win = WebviewWindow.getByLabel('indicator')
     if (!win) return
-    // Restore saved position
+    // Restore saved position (stored as physical coordinates from outerPosition)
     if ($config?.indicator_x != null && $config?.indicator_y != null) {
       try {
-        const { LogicalPosition } = await import('@tauri-apps/api/dpi')
-        await win.setPosition(new LogicalPosition($config.indicator_x, $config.indicator_y))
+        const { PhysicalPosition } = await import('@tauri-apps/api/dpi')
+        await win.setPosition(new PhysicalPosition($config.indicator_x, $config.indicator_y))
       } catch { /* ignore — will use default position */ }
     }
     await win.show()

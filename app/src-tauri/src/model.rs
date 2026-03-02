@@ -138,7 +138,14 @@ pub async fn download_model(models_dir: &Path, app: &AppHandle) -> Result<PathBu
     drop(file);
 
     // Verify SHA256 of the downloaded file.
-    let is_valid = verify_model_sha256(&tmp_path)?;
+    let is_valid = match verify_model_sha256(&tmp_path) {
+        Ok(valid) => valid,
+        Err(e) => {
+            // Clean up .tmp on verification error to avoid permanent failure.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
     if !is_valid {
         // Remove corrupted file so the next attempt starts fresh.
         let _ = std::fs::remove_file(&tmp_path);
