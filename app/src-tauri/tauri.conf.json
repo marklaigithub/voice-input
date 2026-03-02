@@ -32,7 +32,9 @@
         "decorations": false,
         "transparent": true,
         "skipTaskbar": true,
-        "resizable": false
+        "resizable": false,
+        "focusable": false,
+        "focus": false
       }
     ],
     "security": {
