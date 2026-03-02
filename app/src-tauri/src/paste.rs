@@ -18,50 +18,26 @@ fn is_accessibility_trusted() -> bool {
     false
 }
 
-pub struct PasteManager {
-    saved_text: Option<String>,
-    has_saved: bool,
-}
+pub struct PasteManager;
 
 impl PasteManager {
     pub fn new() -> Self {
-        Self {
-            saved_text: None,
-            has_saved: false,
-        }
+        Self
     }
 
+    /// Pastes text into the active application by temporarily using the clipboard.
+    ///
+    /// Flow: save clipboard → write text → Cmd+V → wait → restore clipboard.
+    /// The entire cycle completes within one call — no state carried across calls.
     pub fn paste_text(&mut self, text: &str) -> Result<(), String> {
-        // Lazy restore: if a previous save exists, restore it before overwriting
-        if self.has_saved {
-            if let Some(ref saved) = self.saved_text {
-                let mut clipboard =
-                    Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
-                clipboard
-                    .set_text(saved.clone())
-                    .map_err(|e| format!("Clipboard restore failed: {e}"))?;
-            }
-            self.saved_text = None;
-            self.has_saved = false;
-        }
-
-        // Save current clipboard content
-        {
+        // 1. Save current clipboard content
+        let saved = {
             let mut clipboard =
                 Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
-            match clipboard.get_text() {
-                Ok(current) => {
-                    self.saved_text = Some(current);
-                }
-                Err(_) => {
-                    // Clipboard is empty or contains non-text (image, etc.)
-                    self.saved_text = None;
-                }
-            }
-            self.has_saved = true;
-        }
+            clipboard.get_text().ok()
+        };
 
-        // Write the new text to clipboard
+        // 2. Write the new text to clipboard
         {
             let mut clipboard =
                 Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
@@ -70,16 +46,22 @@ impl PasteManager {
                 .map_err(|e| format!("Clipboard set failed: {e}"))?;
         }
 
-        // Check Accessibility permission before attempting keyboard simulation.
-        // Without this check, Enigo may crash the process (SIGABRT) instead of
-        // returning an error when CGEvent calls fail without AX permission.
+        // 3. Check Accessibility permission before attempting keyboard simulation.
+        //    Without this check, Enigo may crash the process (SIGABRT) instead of
+        //    returning an error when CGEvent calls fail without AX permission.
         if !is_accessibility_trusted() {
+            // Restore clipboard before returning the error.
+            if let Some(ref s) = saved {
+                if let Ok(mut cb) = Clipboard::new() {
+                    let _ = cb.set_text(s.clone());
+                }
+            }
             return Err("Accessibility permission not granted".to_string());
         }
 
-        // Simulate Cmd+V
-        // IMPORTANT: Always release Meta key even if the V click fails,
-        // otherwise the system Cmd key stays stuck.
+        // 4. Simulate Cmd+V
+        //    IMPORTANT: Always release Meta key even if the V click fails,
+        //    otherwise the system Cmd key stays stuck.
         let mut enigo =
             Enigo::new(&Settings::default()).map_err(|e| format!("Enigo init failed: {e}"))?;
         thread::sleep(Duration::from_millis(50));
@@ -96,30 +78,22 @@ impl PasteManager {
         click_result?;
         release_result?;
 
-        Ok(())
-    }
-
-    pub fn restore_clipboard(&mut self) -> Result<(), String> {
-        if !self.has_saved {
-            return Ok(());
+        // 5. Wait for the paste to be consumed by the target app, then restore.
+        thread::sleep(Duration::from_millis(150));
+        if let Some(s) = saved {
+            if let Ok(mut cb) = Clipboard::new() {
+                let _ = cb.set_text(s);
+            }
         }
-
-        if let Some(ref saved) = self.saved_text {
-            let mut clipboard =
-                Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
-            clipboard
-                .set_text(saved.clone())
-                .map_err(|e| format!("Clipboard restore failed: {e}"))?;
-        }
-
-        self.saved_text = None;
-        self.has_saved = false;
 
         Ok(())
     }
 
+    /// Copies text to clipboard without simulating paste.
+    /// Used as fallback when Accessibility permission is not available.
     pub fn clipboard_only(&self, text: &str) -> Result<(), String> {
-        let mut clipboard = Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
+        let mut clipboard =
+            Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
         clipboard
             .set_text(text)
             .map_err(|e| format!("Clipboard set failed: {e}"))?;

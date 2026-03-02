@@ -49,9 +49,6 @@ pub fn run() {
                         if let Ok(config) = state.config.lock() {
                             if let Ok(quit_sc) = config.quit_shortcut.parse::<tauri_plugin_global_shortcut::Shortcut>() {
                                 if *shortcut == quit_sc && event.state == ShortcutState::Pressed {
-                                    if let Ok(mut paste) = state.paste.lock() {
-                                        let _ = paste.restore_clipboard();
-                                    }
                                     app.exit(0);
                                     return;
                                 }
@@ -96,12 +93,13 @@ pub fn run() {
                     config_dir,
                     max_history,
                 )),
+                processing: std::sync::atomic::AtomicBool::new(false),
             };
             app.manage(state);
 
             // Build tray menu
-            let show_item = MenuItemBuilder::with_id("show", "Open Voice Input").build(app)?;
-            let quit_label = format!("Quit ({})", quit_shortcut_key.replace("CmdOrCtrl", "Cmd").replace("Alt", "Option"));
+            let show_item = MenuItemBuilder::with_id("show", "開啟 Voice Input").build(app)?;
+            let quit_label = format!("退出（{}）", quit_shortcut_key.replace("CmdOrCtrl", "Cmd").replace("Alt", "Option"));
             let quit_item = MenuItemBuilder::with_id("quit", &quit_label).build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
@@ -112,7 +110,7 @@ pub fn run() {
             // Build tray icon (embed at compile time for reliable loading in .app bundle)
             let icon = Image::from_bytes(include_bytes!("../icons/tray-idle.png"))
                 .expect("Failed to decode embedded tray icon");
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
                 .icon_as_template(true)
                 .menu(&menu)
@@ -125,16 +123,23 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        if let Some(state) = app.try_state::<AppState>() {
-                            if let Ok(mut paste) = state.paste.lock() {
-                                let _ = paste.restore_clipboard();
-                            }
-                        }
                         app.exit(0);
                     }
                     _ => {}
                 })
                 .build(app)?;
+
+            // Prevent main window from being destroyed on close — hide it instead.
+            // This keeps the frontend event listeners alive for shortcut handling.
+            if let Some(main_win) = app.get_webview_window("main") {
+                let win = main_win.clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win.hide();
+                    }
+                });
+            }
 
             // Register global shortcuts
             let talk_shortcut = shortcut_key

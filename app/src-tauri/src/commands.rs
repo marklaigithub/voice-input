@@ -1,5 +1,6 @@
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::image::Image;
 
 use crate::{
     audio::AudioRecorder,
@@ -8,6 +9,26 @@ use crate::{
     paste::PasteManager,
     whisper::WhisperEngine,
 };
+
+// ---------------------------------------------------------------------------
+// Tray icon helper
+// ---------------------------------------------------------------------------
+
+fn set_tray_recording(app: &AppHandle, recording: bool) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        if recording {
+            if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/tray-recording.png")) {
+                let _ = tray.set_icon(Some(icon));
+                let _ = tray.set_icon_as_template(false);
+            }
+        } else {
+            if let Ok(icon) = Image::from_bytes(include_bytes!("../icons/tray-idle.png")) {
+                let _ = tray.set_icon(Some(icon));
+                let _ = tray.set_icon_as_template(true);
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // App-wide shared state
@@ -19,6 +40,9 @@ pub struct AppState {
     pub recorder: std::sync::Mutex<AudioRecorder>,
     pub paste: std::sync::Mutex<PasteManager>,
     pub history: std::sync::Mutex<HistoryManager>,
+    /// Guards the entire record→transcribe→paste pipeline.
+    /// Prevents a new recording from starting while the previous one is still processing.
+    pub processing: std::sync::atomic::AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,12 +179,23 @@ pub fn init_whisper(state: State<'_, AppState>) -> Result<(), String> {
 /// `audio-level` events every ~80ms for waveform animation in all windows.
 #[tauri::command]
 pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Reject if the previous record→transcribe→paste pipeline is still running.
+    if state.processing.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("busy".to_string());
+    }
+
     let mut recorder = state
         .recorder
         .lock()
         .map_err(|_| "Failed to lock recorder".to_string())?;
 
+    // Reject if already recording (shouldn't happen but belt-and-suspenders).
+    if recorder.is_recording() {
+        return Err("already_recording".to_string());
+    }
+
     recorder.start_recording()?;
+    set_tray_recording(&app, true);
 
     // Spawn audio level emitter — thread exits when is_recording becomes false.
     let (all_samples, is_recording) = recorder.level_emitter_refs();
@@ -209,6 +244,22 @@ pub async fn stop_recording_and_transcribe(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    // Mark pipeline as busy — prevents new recordings from starting.
+    state.processing.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Wrap the entire pipeline so `processing` is always cleared on exit.
+    let result = stop_recording_pipeline(&app, &state).await;
+    state.processing.store(false, std::sync::atomic::Ordering::SeqCst);
+    set_tray_recording(&app, false);
+    result
+}
+
+/// Inner pipeline for stop_recording_and_transcribe.
+/// Separated so the caller can guarantee `processing` flag is cleared.
+async fn stop_recording_pipeline(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<String, String> {
     // -----------------------------------------------------------------------
     // 1. Stop recording and collect audio samples
     //    Lock is taken and released immediately so later locks don't deadlock.
@@ -255,7 +306,7 @@ pub async fn stop_recording_and_transcribe(
     };
 
     // -----------------------------------------------------------------------
-    // 4. Transcribe
+    // 4. Transcribe (wrapped in catch_unwind to survive whisper-rs panics)
     // -----------------------------------------------------------------------
     let text = {
         let whisper = state
@@ -263,14 +314,22 @@ pub async fn stop_recording_and_transcribe(
             .lock()
             .map_err(|_| "Failed to lock whisper".to_string())?;
 
-        match whisper.transcribe(&audio_samples, &language) {
-            Ok(t) => {
+        let transcribe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            whisper.transcribe(&audio_samples, &language)
+        }));
+
+        match transcribe_result {
+            Ok(Ok(t)) => {
                 debug_log!("[CMD] transcribe OK: '{}'", t);
                 t
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 debug_log!("[CMD] transcribe FAILED: {}", e);
                 return Err(e);
+            }
+            Err(_panic) => {
+                debug_log!("[CMD] transcribe PANICKED");
+                return Err("轉錄時發生內部錯誤，請重試".to_string());
             }
         }
     };
@@ -309,18 +368,34 @@ pub async fn stop_recording_and_transcribe(
     debug_log!("[CMD] pasting text: '{}'", text);
 
     // -----------------------------------------------------------------------
-    // 5. Paste into active application (fallback to clipboard if paste fails)
+    // 5. Paste into active application
+    //    MUST run on main thread — enigo calls TSMGetInputSourceProperty
+    //    (macOS Text Services Manager) which asserts main dispatch queue.
     // -----------------------------------------------------------------------
     {
-        let mut paste = state
-            .paste
-            .lock()
-            .map_err(|_| "Failed to lock paste manager".to_string())?;
+        let text_for_paste = text.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
-        match paste.paste_text(&text) {
+        let dispatched = app.run_on_main_thread(move || {
+            let mut paste_mgr = crate::paste::PasteManager::new();
+            let _ = tx.send(paste_mgr.paste_text(&text_for_paste));
+        });
+
+        let paste_result = if dispatched.is_ok() {
+            rx.recv().unwrap_or(Err("Paste channel closed".to_string()))
+        } else {
+            Err("Failed to dispatch to main thread".to_string())
+        };
+
+        match paste_result {
             Ok(()) => debug_log!("[CMD] paste OK"),
             Err(e) => {
                 debug_log!("[CMD] paste FAILED, fallback to clipboard: {}", e);
+                // clipboard_only doesn't need main thread
+                let paste = state
+                    .paste
+                    .lock()
+                    .map_err(|_| "Failed to lock paste manager".to_string())?;
                 if let Err(clip_err) = paste.clipboard_only(&text) {
                     debug_log!("[CMD] clipboard fallback FAILED: {}", clip_err);
                 }
@@ -397,14 +472,22 @@ pub fn transcribe_chunk(
             .lock()
             .map_err(|_| "Failed to lock whisper".to_string())?;
 
-        match whisper.transcribe(&audio_samples, &language) {
-            Ok(t) => {
+        let transcribe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            whisper.transcribe(&audio_samples, &language)
+        }));
+
+        match transcribe_result {
+            Ok(Ok(t)) => {
                 debug_log!("[CMD] chunk transcribe OK: '{}'", t);
                 t
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 debug_log!("[CMD] chunk transcribe FAILED: {}", e);
                 return Err(e);
+            }
+            Err(_panic) => {
+                debug_log!("[CMD] chunk transcribe PANICKED");
+                return Err("轉錄時發生內部錯誤".to_string());
             }
         }
     };
