@@ -1,22 +1,31 @@
-/// Debug logging macro — writes to /tmp/voice-input-debug.log in debug builds only.
-/// In release builds, all debug_log!() calls are compiled away to nothing.
-#[cfg(debug_assertions)]
+/// Logging macro — writes timestamped entries to ~/Library/Logs/VoiceInput/voice-input.log.
+/// Active in both debug and release builds for diagnosing issues in production DMG.
+/// Auto-rotates: truncates log file when it exceeds 1MB.
 macro_rules! debug_log {
     ($($arg:tt)*) => {{
+        use std::io::Write;
+        let log_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("Library/Logs/VoiceInput");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("voice-input.log");
+
+        // Auto-rotate: truncate if > 1MB
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > 1_048_576 {
+                let _ = std::fs::write(&log_path, b"[LOG ROTATED]\n");
+            }
+        }
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/voice-input-debug.log")
+            .open(&log_path)
         {
-            use std::io::Write;
-            let _ = writeln!(f, $($arg)*);
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            let _ = writeln!(f, "[{}] {}", now, format_args!($($arg)*));
         }
     }};
-}
-
-#[cfg(not(debug_assertions))]
-macro_rules! debug_log {
-    ($($arg:tt)*) => {{}};
 }
 
 pub mod audio;
