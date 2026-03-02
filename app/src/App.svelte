@@ -34,7 +34,7 @@
             $modelLoaded = true
             $appState = 'idle'
           } catch (loadErr) {
-            $errorMessage = `Model 載入失敗：${loadErr}`
+            $errorMessage = `模型載入失敗，可能是檔案損壞，請嘗試重新下載`
             $appState = 'idle'
           }
         }
@@ -350,7 +350,14 @@
       $modelLoaded = true
       $appState = 'idle'
     } catch (e) {
-      downloadError = String(e)
+      const raw = String(e)
+      if (raw.includes('connect') || raw.includes('timeout')) {
+        downloadError = '下載失敗：網路連線異常，請檢查網路後再試'
+      } else if (raw.includes('sha256') || raw.includes('hash') || raw.includes('SHA256')) {
+        downloadError = '下載失敗：檔案校驗不符，請重新下載'
+      } else {
+        downloadError = `下載失敗：${raw}`
+      }
     } finally {
       isDownloading = false
       unlisten()
@@ -553,6 +560,7 @@
                 <div class="progress-fill" style="width: {downloadProgress}%"></div>
               </div>
               <span class="progress-text">{downloadProgress}%</span>
+              <span class="settings-hint" style="font-size: 10px; margin-left: 4px;">中斷後可續傳</span>
             </div>
           {:else if $modelLoaded}
             <span class="model-status loaded">已載入</span>

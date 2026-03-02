@@ -100,7 +100,14 @@ pub fn run() {
 
             // Build tray menu
             let show_item = MenuItemBuilder::with_id("show", "開啟 Voice Input").build(app)?;
-            let quit_label = format!("退出（{}）", quit_shortcut_key.replace("CmdOrCtrl", "Cmd").replace("Alt", "Option"));
+            let quit_display = quit_shortcut_key
+                .replace("CmdOrCtrl", "⌘")
+                .replace("Cmd", "⌘")
+                .replace("Ctrl", "⌃")
+                .replace("Alt", "⌥")
+                .replace("Shift", "⇧")
+                .replace("+", "");
+            let quit_label = format!("退出（{}）", quit_display);
             let quit_item = MenuItemBuilder::with_id("quit", &quit_label).build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
