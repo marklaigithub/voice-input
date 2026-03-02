@@ -26,6 +26,10 @@ pub struct AppConfig {
     pub llm_endpoint: String,
     #[serde(default = "default_show_recording_indicator")]
     pub show_recording_indicator: bool,
+    #[serde(default)]
+    pub indicator_x: Option<i32>,
+    #[serde(default)]
+    pub indicator_y: Option<i32>,
 }
 
 fn default_model_path() -> String {
@@ -88,6 +92,8 @@ impl Default for AppConfig {
             llm_model: default_llm_model(),
             llm_endpoint: default_llm_endpoint(),
             show_recording_indicator: default_show_recording_indicator(),
+            indicator_x: None,
+            indicator_y: None,
         }
     }
 }

@@ -195,15 +195,29 @@
   }
 
   // Indicator window show/hide
-  function showIndicatorWindow() {
+  async function showIndicatorWindow() {
     if (!$config?.show_recording_indicator) return
     const win = WebviewWindow.getByLabel('indicator')
-    if (win) win.show()
+    if (!win) return
+    // Restore saved position
+    if ($config?.indicator_x != null && $config?.indicator_y != null) {
+      try {
+        const { LogicalPosition } = await import('@tauri-apps/api/dpi')
+        await win.setPosition(new LogicalPosition($config.indicator_x, $config.indicator_y))
+      } catch { /* ignore — will use default position */ }
+    }
+    await win.show()
   }
 
-  function hideIndicatorWindow() {
+  async function hideIndicatorWindow() {
     const win = WebviewWindow.getByLabel('indicator')
-    if (win) win.hide()
+    if (!win) return
+    // Save current position before hiding
+    try {
+      const pos = await win.outerPosition()
+      saveConfig({ indicator_x: pos.x, indicator_y: pos.y })
+    } catch { /* ignore */ }
+    await win.hide()
   }
 
   // Settings editing

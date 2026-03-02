@@ -10,6 +10,8 @@ export interface AppConfig {
   llm_model: string
   llm_endpoint: string
   show_recording_indicator: boolean
+  indicator_x: number | null
+  indicator_y: number | null
 }
 
 export interface AppStatus {
