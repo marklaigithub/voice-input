@@ -385,6 +385,175 @@ pub fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
     resampled
 }
 
+// ── ListeningMonitor ────────────────────────────────────────────────────────
+
+/// Lightweight audio monitor for auto-listen mode.
+/// Maintains only a rolling window of recent samples (no accumulation).
+/// Used to detect speech onset before starting full recording.
+pub struct ListeningMonitor {
+    recent: Arc<Mutex<Vec<f32>>>,
+    noise_floor: Arc<Mutex<Option<f32>>>,
+    is_listening: Arc<AtomicBool>,
+    stream: Option<cpal::Stream>,
+    pub sample_rate: u32,
+}
+
+unsafe impl Send for ListeningMonitor {}
+
+const MONITOR_WINDOW: usize = 8192;
+
+impl ListeningMonitor {
+    pub fn new() -> Self {
+        Self {
+            recent: Arc::new(Mutex::new(Vec::new())),
+            noise_floor: Arc::new(Mutex::new(None)),
+            is_listening: Arc::new(AtomicBool::new(false)),
+            stream: None,
+            sample_rate: 48000,
+        }
+    }
+
+    pub fn start(&mut self) -> Result<(), String> {
+        {
+            self.recent.lock().unwrap().clear();
+        }
+        {
+            *self.noise_floor.lock().unwrap() = None;
+        }
+        self.is_listening.store(false, Ordering::SeqCst);
+
+        let host = cpal::default_host();
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| "No default input device found".to_string())?;
+        let config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get default input config: {e}"))?;
+
+        self.sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
+
+        let device_name = device.name().unwrap_or_else(|_| "unknown".to_string());
+        debug_log!(
+            "[LISTEN] device='{}', rate={}Hz, channels={}",
+            device_name,
+            self.sample_rate,
+            channels
+        );
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let recent_f32 = Arc::clone(&self.recent);
+                let is_listening_err_f32 = Arc::clone(&self.is_listening);
+                device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            let mono = stereo_to_mono_f32(data, channels);
+                            let mut b = recent_f32.lock().unwrap();
+                            b.extend_from_slice(&mono);
+                            if b.len() > MONITOR_WINDOW {
+                                let d = b.len() - MONITOR_WINDOW;
+                                b.drain(..d);
+                            }
+                        },
+                        move |err| {
+                            log::error!("Monitor stream error: {err}");
+                            is_listening_err_f32.store(false, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to build monitor stream: {e}"))?
+            }
+            cpal::SampleFormat::I16 => {
+                let recent_i16 = Arc::clone(&self.recent);
+                let is_listening_err_i16 = Arc::clone(&self.is_listening);
+                device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                            let converted: Vec<f32> =
+                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                            let mono = stereo_to_mono_f32(&converted, channels);
+                            let mut b = recent_i16.lock().unwrap();
+                            b.extend_from_slice(&mono);
+                            if b.len() > MONITOR_WINDOW {
+                                let d = b.len() - MONITOR_WINDOW;
+                                b.drain(..d);
+                            }
+                        },
+                        move |err| {
+                            log::error!("Monitor stream error: {err}");
+                            is_listening_err_i16.store(false, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to build monitor stream: {e}"))?
+            }
+            cpal::SampleFormat::U16 => {
+                let recent_u16 = Arc::clone(&self.recent);
+                let is_listening_err_u16 = Arc::clone(&self.is_listening);
+                device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                            let converted: Vec<f32> = data
+                                .iter()
+                                .map(|&s| s as f32 / u16::MAX as f32 * 2.0 - 1.0)
+                                .collect();
+                            let mono = stereo_to_mono_f32(&converted, channels);
+                            let mut b = recent_u16.lock().unwrap();
+                            b.extend_from_slice(&mono);
+                            if b.len() > MONITOR_WINDOW {
+                                let d = b.len() - MONITOR_WINDOW;
+                                b.drain(..d);
+                            }
+                        },
+                        move |err| {
+                            log::error!("Monitor stream error: {err}");
+                            is_listening_err_u16.store(false, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to build monitor stream: {e}"))?
+            }
+            fmt => return Err(format!("Unsupported sample format: {fmt:?}")),
+        };
+
+        stream
+            .play()
+            .map_err(|e| format!("Failed to start monitor stream: {e}"))?;
+        self.stream = Some(stream);
+        self.is_listening.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn stop(&mut self) {
+        self.is_listening.store(false, Ordering::SeqCst);
+        self.stream = None;
+    }
+
+    pub fn is_listening(&self) -> bool {
+        self.is_listening.load(Ordering::SeqCst)
+    }
+
+    pub fn background_thread_refs(
+        &self,
+    ) -> (
+        Arc<Mutex<Vec<f32>>>,
+        Arc<Mutex<Option<f32>>>,
+        Arc<AtomicBool>,
+        u32,
+    ) {
+        (
+            Arc::clone(&self.recent),
+            Arc::clone(&self.noise_floor),
+            Arc::clone(&self.is_listening),
+            self.sample_rate,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -28,4 +28,4 @@ export interface HistoryEntry {
   duration_secs: number
 }
 
-export type AppState = 'idle' | 'recording' | 'transcribing' | 'correcting' | 'loading'
+export type AppState = 'idle' | 'recording' | 'transcribing' | 'correcting' | 'loading' | 'listening'

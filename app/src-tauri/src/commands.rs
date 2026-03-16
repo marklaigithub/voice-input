@@ -46,6 +46,7 @@ pub struct AppState {
     /// Accumulates text from VAD-triggered segment transcriptions during recording.
     /// Cleared at the start of each recording and consumed when recording stops.
     pub segments_pasted: std::sync::Mutex<Vec<String>>,
+    pub monitor: std::sync::Mutex<crate::audio::ListeningMonitor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +801,127 @@ pub async fn transcribe_and_paste_segment(
     debug_log!("[CMD] segment pasted and stored: '{}'", text);
 
     Ok(Some(text))
+}
+
+/// Starts passive microphone monitoring to detect speech onset.
+/// Does NOT record audio — only watches for speech above noise floor.
+/// Emits `speech-detected` event when 150ms of sustained speech is detected.
+/// Emits `listening-level` events (~20/sec) for waveform animation.
+#[tauri::command]
+pub fn start_listening(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if state.processing.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("busy".to_string());
+    }
+    if state
+        .recorder
+        .lock()
+        .map_err(|_| "Failed to lock recorder".to_string())?
+        .is_recording()
+    {
+        return Err("already_recording".to_string());
+    }
+
+    let (recent, noise_floor, is_listening, sample_rate) = {
+        let mut monitor = state
+            .monitor
+            .lock()
+            .map_err(|_| "Failed to lock monitor".to_string())?;
+        if monitor.is_listening() {
+            return Ok(());
+        }
+        monitor.start()?;
+        monitor.background_thread_refs()
+    };
+
+    std::thread::spawn(move || {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        debug_log!("[LISTEN] monitoring thread started, sample_rate={}", sample_rate);
+
+        // Phase 1: noise floor calibration (500ms of silence expected)
+        let calib_start = Instant::now();
+        while is_listening.load(Ordering::SeqCst) {
+            if calib_start.elapsed() >= Duration::from_millis(500) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !is_listening.load(Ordering::SeqCst) {
+            debug_log!("[LISTEN] stopped during calibration");
+            return;
+        }
+
+        let calibrated_nf = {
+            let buf = recent.lock().unwrap();
+            if buf.is_empty() {
+                0.0f32
+            } else {
+                let window = (sample_rate as usize / 10).min(buf.len());
+                let tail = &buf[buf.len() - window..];
+                let sum_sq: f32 = tail.iter().map(|&s| s * s).sum();
+                (sum_sq / window as f32).sqrt()
+            }
+        };
+        *noise_floor.lock().unwrap() = Some(calibrated_nf);
+        debug_log!("[LISTEN] noise_floor calibrated: {:.4}", calibrated_nf);
+
+        // Phase 2: speech onset detection
+        // Require 150ms of sustained speech to avoid triggering on transients.
+        let mut speech_onset: Option<Instant> = None;
+        const ONSET_MS: u128 = 150;
+
+        while is_listening.load(Ordering::SeqCst) {
+            let rms = {
+                let buf = recent.lock().unwrap();
+                if buf.is_empty() {
+                    0.0f32
+                } else {
+                    let window = (sample_rate as usize / 10).min(buf.len());
+                    let tail = &buf[buf.len() - window..];
+                    let sum_sq: f32 = tail.iter().map(|&s| s * s).sum();
+                    (sum_sq / window as f32).sqrt()
+                }
+            };
+
+            let nf = noise_floor.lock().unwrap().unwrap_or(0.0).min(0.05);
+            let threshold = (nf * 2.0).max(0.002);
+            let level = (rms * 5.0).min(1.0);
+
+            let _ = app.emit("listening-level", level);
+
+            if rms > threshold {
+                if speech_onset.is_none() {
+                    debug_log!("[LISTEN] speech onset (rms={:.4}, threshold={:.4})", rms, threshold);
+                    speech_onset = Some(Instant::now());
+                } else if speech_onset.unwrap().elapsed().as_millis() >= ONSET_MS {
+                    debug_log!("[LISTEN] speech confirmed, emitting speech-detected");
+                    is_listening.store(false, Ordering::SeqCst);
+                    let _ = app.emit("speech-detected", ());
+                    break;
+                }
+            } else {
+                speech_onset = None;
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        debug_log!("[LISTEN] monitoring thread stopped");
+    });
+
+    Ok(())
+}
+
+/// Stops passive microphone monitoring.
+#[tauri::command]
+pub fn stop_listening(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .monitor
+        .lock()
+        .map_err(|_| "Failed to lock monitor".to_string())?
+        .stop();
+    Ok(())
 }
 
 /// Handles the stop pipeline when VAD segments were pasted during recording.

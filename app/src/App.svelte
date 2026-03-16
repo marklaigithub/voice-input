@@ -49,7 +49,11 @@
 
     // Listen for shortcut events (press-to-talk)
     await listen<string>('shortcut-event', async (event) => {
-      if (event.payload === 'pressed' && $appState === 'idle' && $modelLoaded) {
+      if (event.payload === 'pressed' && ($appState === 'idle' || $appState === 'listening') && $modelLoaded) {
+        // If we were in listening mode, stop monitoring first
+        if ($appState === 'listening') {
+          await stopListeningMode()
+        }
         try {
           $appState = 'recording'
           llmApplied = null
@@ -66,7 +70,12 @@
           if (err !== 'busy' && err !== 'already_recording') {
             $errorMessage = err
           }
-          $appState = 'idle'
+          if (isAutoListen) {
+            $appState = 'listening'
+            await startAutoListenCore()
+          } else {
+            $appState = 'idle'
+          }
         }
       } else if (event.payload === 'released' && $appState === 'recording') {
         stopAudioLevelListener()
@@ -83,7 +92,13 @@
             const h: HistoryEntry[] = await invoke('get_history')
             $history = h
           }
-          $appState = 'idle'
+          // If auto-listen was active, return to monitoring
+          if (isAutoListen) {
+            $appState = 'listening'
+            await startAutoListenCore()
+          } else {
+            $appState = 'idle'
+          }
         } catch (e) {
           const err = String(e)
           if (err === 'too_short') {
@@ -91,7 +106,12 @@
           } else {
             $errorMessage = err
           }
-          $appState = 'idle'
+          if (isAutoListen) {
+            $appState = 'listening'
+            await startAutoListenCore()
+          } else {
+            $appState = 'idle'
+          }
         }
       }
     })
@@ -122,6 +142,134 @@
     })
   })
 
+  // ── Auto-listen state machine ──────────────────────────────────────────────
+
+  /// Starts the passive monitoring phase (listens for speech onset).
+  async function startAutoListenCore() {
+    try {
+      await invoke('start_listening')
+      unlistenListeningLevel = await listen<number>('listening-level', (event) => {
+        listeningLevel = event.payload
+      })
+      unlistenSpeechDetected = await listen('speech-detected', async () => {
+        // Tear down listening mode, then start recording
+        if (unlistenListeningLevel) { unlistenListeningLevel(); unlistenListeningLevel = null }
+        if (unlistenSpeechDetected) { unlistenSpeechDetected(); unlistenSpeechDetected = null }
+        listeningLevel = 0
+        await invoke('stop_listening')
+        await startRecordingAuto()
+      })
+    } catch (e) {
+      isAutoListen = false
+      $appState = 'idle'
+      $errorMessage = String(e)
+    }
+  }
+
+  /// Enters auto-listen mode.
+  async function startAutoListen() {
+    if (!$modelLoaded) return
+    isAutoListen = true
+    $appState = 'listening'
+    await startAutoListenCore()
+  }
+
+  /// Stops monitoring without stopping an in-progress recording.
+  async function stopListeningMode() {
+    if (unlistenListeningLevel) { unlistenListeningLevel(); unlistenListeningLevel = null }
+    if (unlistenSpeechDetected) { unlistenSpeechDetected(); unlistenSpeechDetected = null }
+    listeningLevel = 0
+    try { await invoke('stop_listening') } catch { /* ignore */ }
+  }
+
+  /// Exits auto-listen mode entirely (also stops any in-progress recording).
+  async function stopAutoListen() {
+    isAutoListen = false
+    await stopListeningMode()
+    if ($appState === 'recording') {
+      stopAudioLevelListener()
+      await stopVadListener()
+      await emit('recording-stopped')
+      await hideIndicatorWindow()
+      try {
+        $appState = 'transcribing'
+        const text: string = await invoke('stop_recording_and_transcribe')
+        if (text) {
+          $lastTranscription = text
+          const h: HistoryEntry[] = await invoke('get_history')
+          $history = h
+        }
+      } catch { /* ignore */ }
+    }
+    $appState = 'idle'
+  }
+
+  /// Starts a recording session triggered by speech detection.
+  async function startRecordingAuto() {
+    if (!isAutoListen) return
+    try {
+      $appState = 'recording'
+      llmApplied = null
+      await invoke('start_recording')
+      startAudioLevelListener()
+      startVadListenerAuto()
+      await emit('recording-started')
+      await showIndicatorWindow()
+    } catch (e) {
+      $errorMessage = String(e)
+      if (isAutoListen) {
+        $appState = 'listening'
+        await startAutoListenCore()
+      } else {
+        $appState = 'idle'
+      }
+    }
+  }
+
+  /// VAD listener for auto-listen mode.
+  /// After each speech segment: transcribe → paste → stop → restart listening.
+  async function startVadListenerAuto() {
+    unlistenVad = await listen('speech-segment-ready', () => {
+      if (pendingSegment) return
+      const promise = (async () => {
+        // Transcribe and paste the detected segment
+        try {
+          const result: string | null = await invoke('transcribe_and_paste_segment')
+          if (result) $lastTranscription = result
+        } catch (e) {
+          console.warn('[AUTO] Segment transcription failed:', e)
+        }
+
+        // Stop recording and clean up
+        stopAudioLevelListener()
+        await stopVadListener()
+        await emit('recording-stopped')
+        await hideIndicatorWindow()
+        try {
+          $appState = 'transcribing'
+          const text: string = await invoke('stop_recording_and_transcribe')
+          if (text) $lastTranscription = text
+        } catch { /* 'too_short' etc — not an error */ }
+
+        // Refresh history
+        try {
+          const h: HistoryEntry[] = await invoke('get_history')
+          $history = h
+        } catch { /* ignore */ }
+
+        // Return to listening mode if still in auto-listen
+        if (isAutoListen) {
+          $appState = 'listening'
+          await startAutoListenCore()
+        } else {
+          $appState = 'idle'
+        }
+      })()
+      pendingSegment = promise
+      promise.then(() => { if (pendingSegment === promise) pendingSegment = null })
+    })
+  }
+
   async function handleClearHistory() {
     if (!confirm(`確定清除全部 ${$history.length} 筆歷史記錄？此操作無法復原。`)) return
     await invoke('clear_history')
@@ -135,6 +283,7 @@
       case 'transcribing': return '轉錄中…'
       case 'correcting': return '校正中…'
       case 'loading': return '載入模型中…'
+      case 'listening': return '偵測說話中…'
       default: return state
     }
   }
@@ -145,6 +294,7 @@
       case 'transcribing': return '#f59e0b'
       case 'correcting': return '#8b5cf6'
       case 'loading': return '#6b7280'
+      case 'listening': return '#3b82f6'
       default: return '#22c55e'
     }
   }
@@ -226,6 +376,12 @@
   }
 
   // Settings editing
+  // Auto-listen mode
+  let isAutoListen = $state(false)
+  let listeningLevel = $state(0)
+  let unlistenListeningLevel: (() => void) | null = null
+  let unlistenSpeechDetected: (() => void) | null = null
+
   // VAD-driven segment transcription — replaces the old 6s polling.
   // When the backend detects a speech pause (800ms silence), it emits
   // 'speech-segment-ready'. We transcribe + paste each segment immediately.
@@ -422,6 +578,8 @@
         <div class="big-status">
           {#if $appState === 'recording'}
             <AudioWaveform level={audioLevel} />
+          {:else if $appState === 'listening'}
+            <AudioWaveform level={listeningLevel} />
           {:else}
             <div class="big-dot" style="background-color: {stateColor($appState)}"></div>
           {/if}
@@ -440,6 +598,16 @@
         {/if}
         <div class="shortcut-hint">
           <p>按住 <kbd>{formatShortcut($config?.shortcut ?? 'Cmd+Shift+Space')}</kbd> 說話</p>
+        </div>
+        <div class="auto-listen-row">
+          <button
+            class="toggle"
+            class:on={isAutoListen}
+            disabled={!$modelLoaded || $appState === 'loading' || $appState === 'transcribing' || $appState === 'correcting'}
+            onclick={isAutoListen ? stopAutoListen : startAutoListen}
+          >
+            {isAutoListen ? '關閉自動偵測' : '自動偵測說話'}
+          </button>
         </div>
       </div>
 
@@ -1010,5 +1178,15 @@
     border-radius: 4px;
     font-size: 12px;
     font-family: inherit;
+  }
+
+  .auto-listen-row {
+    display: flex;
+    justify-content: center;
+  }
+
+  .auto-listen-row .toggle {
+    padding: 8px 20px;
+    font-size: 13px;
   }
 </style>

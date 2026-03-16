@@ -104,6 +104,7 @@ pub fn run() {
                 )),
                 processing: std::sync::atomic::AtomicBool::new(false),
                 segments_pasted: std::sync::Mutex::new(Vec::new()),
+                monitor: std::sync::Mutex::new(audio::ListeningMonitor::new()),
             };
             app.manage(state);
 
@@ -204,6 +205,8 @@ pub fn run() {
             commands::transcribe_file,
             commands::get_engine_busy,
             commands::check_llm_status,
+            commands::start_listening,
+            commands::stop_listening,
         ])
         .run(tauri::generate_context!())
         .expect("error while running voice-input");
