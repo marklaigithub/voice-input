@@ -15,3 +15,6 @@ test-audio/
 
 # Tauri generated
 app/src-tauri/gen/
+
+# Claude Code agent worktrees
+.claude/worktrees/
