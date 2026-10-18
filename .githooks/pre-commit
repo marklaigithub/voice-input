@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# pre-commit：依 staged 檔案決定跑哪些檢查。啟用方式見 README。
+set -u
+
+ROOT="$(git rev-parse --show-toplevel)" || exit 1
+STAGED="$(git diff --cached --name-only)"
+
+run_rust=0
+run_front=0
+while IFS= read -r f; do
+  case "$f" in
+    app/src-tauri/*) run_rust=1 ;;
+    app/src/*) run_front=1 ;;
+    app/package.json | app/tsconfig*.json | app/vite.config.ts | app/svelte.config.js) run_front=1 ;;
+  esac
+done <<EOF
+$STAGED
+EOF
+
+[ "$run_rust" = 0 ] && [ "$run_front" = 0 ] && exit 0
+
+fail=0
+run_check() {
+  name="$1"
+  shift
+  out="$("$@" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "[pre-commit] OK: $name"
+  else
+    echo "[pre-commit] FAILED: $name (exit $rc)"
+    printf '%s\n' "$out" | tail -n 25
+    fail=1
+  fi
+}
+
+if [ "$run_rust" = 1 ]; then
+  run_check "cargo test" cargo test --manifest-path "$ROOT/app/src-tauri/Cargo.toml"
+fi
+if [ "$run_front" = 1 ]; then
+  run_check "npm run check" npm --prefix "$ROOT/app" run check
+fi
+
+if [ "$fail" != 0 ]; then
+  echo "[pre-commit] 檢查未通過，commit 已中止（緊急略過：git commit --no-verify）"
+  exit 1
+fi
+exit 0

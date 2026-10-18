@@ -92,6 +92,16 @@ npm run tauri build
 cargo test --manifest-path app/src-tauri/Cargo.toml
 ```
 
+**Git pre-commit hook：**
+
+commit 前會依 staged 檔案自動跑檢查（改到 `app/src-tauri/` 跑 `cargo test`，改到 `app/src/` 或前端設定檔跑 `npm --prefix app run check`，只改文件則直接放行）。clone 後需執行一次才會啟用：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+緊急略過：`git commit --no-verify`。
+
 ## 設定說明
 
 設定檔位置：`~/Library/Application Support/com.voice-input.app/config.json`
