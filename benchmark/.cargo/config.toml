@@ -1,0 +1,6 @@
+# 編譯產物放 /tmp，不留在 repo 裡；用完可直接刪
+[build]
+target-dir = "/tmp/voice-input-benchmark-target"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-lc++", "-l", "framework=Accelerate"]
